@@ -6,7 +6,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2023	PgPool Global Development Group
+ * Copyright (c) 2003-2024	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -575,7 +575,7 @@ typedef struct
 	bool		failover_when_quorum_exists;	/* Do failover only when wd
 												 * cluster holds the quorum */
 	bool		failover_require_consensus; /* Only do failover when majority
-											 * aggrees */
+											 * agrees */
 	bool		allow_multiple_failover_requests_from_node; /* One Pgpool-II node
 															 * can send multiple
 															 * failover requests to
@@ -644,7 +644,7 @@ typedef struct
 }			POOL_CONFIG;
 
 extern POOL_CONFIG * pool_config;
-extern char *config_file_dir; /* directory path of config file pgpool.conf */
+extern char config_file_dir[]; /* directory path of config file pgpool.conf */
 
 typedef enum
 {
