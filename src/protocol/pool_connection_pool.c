@@ -5,7 +5,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2023	PgPool Global Development Group
+ * Copyright (c) 2003-2024	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -919,6 +919,7 @@ static POOL_CONNECTION_POOL * new_connection(POOL_CONNECTION_POOL * p)
 
 			/* sync local status with global status */
 			*(my_backend_status[i]) = status;
+			my_main_node_id = Req_info->main_node_id;
 			continue;
 		}
 
@@ -1084,12 +1085,17 @@ close_all_backend_connections(void)
 	POOL_SETMASK(&oldmask);
 }
 
-void update_pooled_connection_count(void)
+/*
+ * Return number of established connections in the connection pool.
+ * This is called when a client disconnects to pgpool.
+ */
+void
+update_pooled_connection_count(void)
 {
 	int i;
 	int count = 0;
 	POOL_CONNECTION_POOL *p = pool_connection_pool;
-	for (i = 0; i < pool_config->max_pool; i++)
+	for (i = 0; i < pool_config->max_pool; i++, p++)
 	{
 		if (MAIN_CONNECTION(p))
 			count++;
