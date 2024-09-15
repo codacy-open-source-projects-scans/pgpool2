@@ -993,6 +993,11 @@ pool_is_allow_to_cache(Node *node, char *query)
 		}
 	}
 
+	/*
+	 * If SELECT uses row security enabled tables, it's not allowed to cache.
+	 */
+	if (pool_has_row_security(node))
+		return false;
 
 	/*
 	 * If the table is in the cache_safe_memqcache_table_list, allow to cache
@@ -1738,6 +1743,7 @@ pool_add_table_oid_map(POOL_CACHEKEY * cachekey, int num_table_oids, int *table_
 					(errmsg("memcache: adding table oid maps, failed to write file:\"%s\"", path),
 					 errdetail("%m")));
 			close(fd);
+			pfree(path);
 			return;
 		}
 		close(fd);
@@ -1850,6 +1856,7 @@ pool_invalidate_query_cache(int num_table_oids, int *table_oid, bool unlinkp, in
 			return;
 		}
 	}
+	pfree(path);
 
 	if (pool_is_shmem_cache())
 	{
@@ -1881,6 +1888,7 @@ pool_invalidate_query_cache(int num_table_oids, int *table_oid, bool unlinkp, in
 			ereport(DEBUG1,
 					(errmsg("memcache invalidating query cache"),
 					 errdetail("failed to open \"%s\". reason:\"%m\"", path)));
+			pfree(path);
 			continue;
 		}
 
@@ -2141,6 +2149,28 @@ pool_clear_memory_cache(void)
 	pool_shmem_unlock();
 	POOL_SETMASK(&oldmask);
 }
+
+#ifdef USE_MEMCACHED
+/*
+ * delete all query cache on memcached
+ */
+int
+delete_all_cache_on_memcached(void)
+{
+	memcached_return rc;
+
+	rc = memcached_flush(memc, 0);
+
+	/* delete all cache on memcached */
+	if (rc != MEMCACHED_SUCCESS && rc != MEMCACHED_BUFFERED)
+	{
+		ereport(LOG,
+				(errmsg("failed to delete all cache on memcached, error:\"%s\"", memcached_strerror(memc, rc))));
+		return 0;
+	}
+	return 1;
+}
+#endif
 
 /*
  * Return shared memory cache address
@@ -3599,7 +3629,7 @@ pool_handle_query_cache(POOL_CONNECTION_POOL * backend, char *query, Node *node,
 	session_context = pool_get_session_context(true);
 
 	/* Ok to cache SELECT result? */
-	if (pool_is_cache_safe())
+	if (pool_is_cache_safe() && !query_cache_disabled())
 	{
 		SelectContext ctx;
 		MemoryContext old_context;

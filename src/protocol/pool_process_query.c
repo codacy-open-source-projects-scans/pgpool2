@@ -2835,7 +2835,7 @@ insert_lock(POOL_CONNECTION * frontend, POOL_CONNECTION_POOL * backend, char *qu
 					per_node_statement_log(backend, i, qbuf);
 					if (pool_get_session_context(true) && pool_is_doing_extended_query_message())
 					{
-						do_query(MAIN(backend), qbuf, &result, MAJOR(backend));
+						do_query(CONNECTION(backend, i), qbuf, &result, MAJOR(backend));
 						if (result)
 							free_select_result(result);
 					}
@@ -2845,7 +2845,7 @@ insert_lock(POOL_CONNECTION * frontend, POOL_CONNECTION_POOL * backend, char *qu
 											MAIN_CONNECTION(backend)->pid, MAIN_CONNECTION(backend)->key, 0);
 					}
 				}
-				else if (lock_kind == 2)
+				else if (lock_kind == 2 || lock_kind == 3)
 				{
 					per_node_statement_log(backend, i, qbuf);
 					do_query(CONNECTION(backend, i), qbuf, &result, MAJOR(backend));
@@ -5225,10 +5225,10 @@ pool_push_pending_data(POOL_CONNECTION * backend)
 
 		len_save = len;
 		len = ntohl(len);
+		len -= sizeof(len);
 		buf = NULL;
-		if ((len - sizeof(len)) > 0)
+		if (len  > 0)
 		{
-			len -= sizeof(len);
 			buf = palloc(len);
 			pool_read(backend, buf, len);
 		}
