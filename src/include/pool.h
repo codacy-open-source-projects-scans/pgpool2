@@ -4,7 +4,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2023	PgPool Global Development Group
+ * Copyright (c) 2003-2024	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -266,7 +266,12 @@ typedef struct
 
 typedef struct
 {
-	ConnectionInfo *info;		/* connection info on shmem */
+	/*
+	 * info is initialized by pool_init_cp() at the startup of pgpool child
+	 * process. pool_coninfo(child id, pool index, backend id = 0) is used to
+	 * refer to the appropriate pointer on shared memory.
+	 */
+	ConnectionInfo *info;
 	POOL_CONNECTION_POOL_SLOT *slots[MAX_NUM_BACKENDS];
 }			POOL_CONNECTION_POOL;
 
@@ -454,6 +459,7 @@ typedef struct
 	bool		follow_primary_lock_held_remotely; /* true when lock is held by
 													watchdog coordinator*/
 	bool		follow_primary_ongoing;	/* true if follow primary command is ongoing */
+	bool		query_cache_invalidate_request;	/* true if pcp_invalidate_query_cache requested */
 }			POOL_REQUEST_INFO;
 
 /* description of row. corresponding to RowDescription message */
