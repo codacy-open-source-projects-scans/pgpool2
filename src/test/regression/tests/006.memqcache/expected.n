@@ -567,3 +567,62 @@ NOTICE:  DB node id: 0 statement: SELECT * FROM t1;
  2 |  
 (1 row)
 
+--
+-- ALTER ROLE WITH ENCRYPTED PASSWORD and
+-- ALTER ROLE WITH CONNECTION LIMIT 10
+-- do not invalidate query cache
+SELECT 10;
+NOTICE:  DB node id: 0 statement: SELECT 10;
+ ?column? 
+----------
+       10
+(1 row)
+
+SELECT 10;
+ ?column? 
+----------
+       10
+(1 row)
+
+ALTER ROLE foo WITH ENCRYPTED PASSWORD 'foo';
+NOTICE:  DB node id: 0 statement: ALTER ROLE foo WITH ENCRYPTED PASSWORD 'foo';
+ALTER ROLE
+ALTER ROLE foo WITH CONNECTION LIMIT 10;
+NOTICE:  DB node id: 0 statement: ALTER ROLE foo WITH CONNECTION LIMIT 10;
+ALTER ROLE
+SELECT 10;
+ ?column? 
+----------
+       10
+(1 row)
+
+--
+-- PGPOOL SET CACHE DELETE test cases.
+--
+-- force to create cache
+/*FORCE QUERY CACHE*/SELECT 1;
+NOTICE:  DB node id: 0 statement: /*FORCE QUERY CACHE*/SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- make sure the cache was created
+/*FORCE QUERY CACHE*/SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- delete the cache
+PGPOOL SET CACHE DELETE '/*FORCE QUERY CACHE*/SELECT 1;';
+NOTICE:  query cache deleted. query: "/*FORCE QUERY CACHE*/SELECT 1;"
+SET
+-- make sure the cache was deleted
+/*FORCE QUERY CACHE*/SELECT 1;
+NOTICE:  DB node id: 0 statement: /*FORCE QUERY CACHE*/SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
