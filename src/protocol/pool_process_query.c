@@ -2372,7 +2372,7 @@ do_query(POOL_CONNECTION * backend, char *query, POOL_SELECT_RESULT * *result, i
 					if (p)
 					{
 						memcpy(&shortval, p, sizeof(short));
-						num_fields = htons(shortval);
+						num_fields = ntohs(shortval);
 						p += sizeof(short);
 					}
 					else
@@ -2404,7 +2404,7 @@ do_query(POOL_CONNECTION * backend, char *query, POOL_SELECT_RESULT * *result, i
 						if (major == PROTO_MAJOR_V3)
 						{
 							memcpy(&intval, p, sizeof(int));
-							len = htonl(intval);
+							len = ntohl(intval);
 							p += sizeof(int);
 
 							res->nullflags[num_data] = len;
@@ -3430,6 +3430,8 @@ read_kind_from_backend(POOL_CONNECTION * frontend, POOL_CONNECTION_POOL * backen
 				ereport(DEBUG5,
 						(errmsg("reading backend data packet kind"),
 						 errdetail("backend:%d kind:'%c'", i, kind)));
+
+				log_backend_messages(kind, i);
 
 				/*
 				 * Read and forward notice messages to frontend

@@ -453,9 +453,9 @@
 	 the directory in which log files will be created.
      </para>
 	 <para>The default is <literal>/tmp/pgpool_logs</literal>.</para>
-	 <para>
-	 This parameter can only be set at the Pgpool-II start.
-	 </para>
+     <para>
+      This parameter can be changed by reloading the <productname>Pgpool-II</> configurations.
+     </para>
 
     </listitem>
    </varlistentry>
@@ -482,9 +482,9 @@
 	 <para>
 	 The default is <literal>pgpool-%Y-%m-%d_%H%M%S.log</literal>.
 	 </para>
-	 <para>
-	 This parameter can only be set at the Pgpool-II start.
-	 </para>
+     <para>
+      This parameter can be changed by reloading the <productname>Pgpool-II</> configurations.
+     </para>
     </listitem>
    </varlistentry>
 
@@ -507,9 +507,9 @@
 	 </para>
 	 </note>
 
-	<para>
-	 This parameter can only be set at the Pgpool-II start.
-	 </para>
+     <para>
+      This parameter can be changed by reloading the <productname>Pgpool-II</> configurations.
+     </para>
     </listitem>
    </varlistentry>
 
@@ -529,9 +529,9 @@
 	 <para>
 	 Set to zero to disable time-based creation of new log files.
      </para>
-	 <para>
-	 This parameter can only be set at the Pgpool-II start.
-	 </para>
+     <para>
+      This parameter can be changed by reloading the <productname>Pgpool-II</> configurations.
+     </para>
     </listitem>
    </varlistentry>
 
@@ -550,9 +550,9 @@
 	 <para>
 	 Set to zero to disable size-based creation of new log files.
      </para>
-	 <para>
-	 This parameter can only be set at the Pgpool-II start.
-	 </para>
+     <para>
+      This parameter can be changed by reloading the <productname>Pgpool-II</> configurations.
+     </para>
     </listitem>
    </varlistentry>
 
@@ -574,9 +574,9 @@
 	 like pgpool-%H.log would result in generating twenty-four hourly log
 	 files and then cyclically overwriting them.
      </para>
-	 <para>
-	 This parameter can only be set at the Pgpool-II start.
-	 </para>
+     <para>
+      This parameter can be changed by reloading the <productname>Pgpool-II</> configurations.
+     </para>
     </listitem>
    </varlistentry>
 
@@ -773,6 +773,38 @@
       This parameter can be changed by reloading the <productname>Pgpool-II</> configurations.
       You can also use <xref linkend="SQL-PGPOOL-SET"> command to alter the value of
        this parameter for a current session.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="guc-log-backend-messages" xreflabel="log_backend_messages">
+    <term><varname>log_backend_messages</varname> (<type>boolean</type>)
+     <indexterm>
+      <primary><varname>log_backend_messages</varname> configuration parameter</primary>
+     </indexterm>
+    </term>
+    <listitem>
+     <para>
+      Setting to <literal>terse</literal>
+      or <literal>verbose</literal>, prints backend messages to the
+      log.  With <literal>terse</literal> the number of same kind of
+      messages are recorded and is printed when different kind of
+      messages is sent. Below is an example.
+      <programlisting>
+       LOG:  last DataRow message from backend 0 repeated 10 times
+      </programlisting>
+      Thus the log will not be printed if the process corresponding to
+      the session is killed. If you want to print the log even in this
+      case, use <literal>verbose</literal> option. Note that with the
+      option each repeated message is printed and lots of log lines
+      are printed. The default is <literal>none</literal>, which
+      disables printing log messages from backend.
+     </para>
+     <para>
+      This parameter can be changed by reloading
+      the <productname>Pgpool-II</> configurations.  You can also
+      use <xref linkend="SQL-PGPOOL-SET"> command to alter the value
+      of this parameter for a current session.
      </para>
     </listitem>
    </varlistentry>

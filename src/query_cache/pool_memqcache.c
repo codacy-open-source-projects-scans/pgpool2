@@ -126,6 +126,7 @@ static void put_back_hash_element(volatile POOL_HASH_ELEMENT * element);
 static bool is_free_hash_element(void);
 static void inject_cached_message(POOL_CONNECTION * backend, char *qcache, int qcachelen);
 static int delete_all_cache_on_memcached(void);
+static char *create_fake_cache(size_t *len);
 
 /*
  * if true, shared memory is locked in this process now.
@@ -727,11 +728,13 @@ delete_cache_on_memcached(const char *key)
 
 /*
  * Fetch SELECT data from cache if possible.
+ *
+ * If use_fake_cache is true, make up "CommandComplete 0" result and use it.
  */
 POOL_STATUS
 pool_fetch_from_memory_cache(POOL_CONNECTION * frontend,
 							 POOL_CONNECTION_POOL * backend,
-							 char *contents, bool *foundp)
+							 char *contents, bool use_fake_cache, bool *foundp)
 {
 	char	   *qcache;
 	size_t		qcachelen;
@@ -780,6 +783,16 @@ pool_fetch_from_memory_cache(POOL_CONNECTION * frontend,
 
 		session_context = pool_get_session_context(true);
 		target_backend = CONNECTION(backend, session_context->load_balance_node_id);
+
+		/*
+		 * If use_fake_cache is true, make up "CommandComplete (0)" response.
+		 */
+		if (use_fake_cache)
+		{
+			pfree(qcache);
+			qcache = create_fake_cache(&qcachelen);
+			elog(DEBUG2, "fake_cach: len: %ld", qcachelen);
+		}
 		inject_cached_message(target_backend, qcache, qcachelen);
 	}
 	else
@@ -826,6 +839,29 @@ pool_fetch_from_memory_cache(POOL_CONNECTION * frontend,
 			 errdetail("query result found in the query cache, %s", contents)));
 
 	return POOL_CONTINUE;
+}
+
+/*
+ * Make up response packet for "CommandComplete (SELECT 0)" message.
+ */
+static char *
+create_fake_cache(size_t *len)
+{
+	char		*qcache, *p;
+	int32		mlen;	/* message length including self */
+	static		char*	msg = "SELECT 0";
+
+	*len = sizeof(char)	+	/* message kind */
+		sizeof(int32) +		/* packet length including self */
+		sizeof(msg);	/* Command Complete message with 0 row returned */
+	mlen = *len - 1;	/* message length does not include message kind */
+	mlen = htonl(mlen);
+	p = qcache = palloc(*len);
+	*p++ = 'C';
+	memcpy(p, &mlen, sizeof(mlen));
+	p += sizeof(mlen);
+	strncpy(p, msg, strlen(msg) + 1);
+	return qcache;
 }
 
 /*
@@ -3652,7 +3688,8 @@ pool_check_and_discard_cache_buffer(int num_oids, int *oids)
  * For other case At Ready for Query handle query cache.
  */
 void
-pool_handle_query_cache(POOL_CONNECTION_POOL * backend, char *query, Node *node, char state)
+pool_handle_query_cache(POOL_CONNECTION_POOL * backend, char *query, Node *node, char state,
+						bool partial_fetch)
 {
 	POOL_SESSION_CONTEXT *session_context;
 	pool_sigset_t oldmask;
@@ -3665,7 +3702,7 @@ pool_handle_query_cache(POOL_CONNECTION_POOL * backend, char *query, Node *node,
 	session_context = pool_get_session_context(true);
 
 	/* Ok to cache SELECT result? */
-	if (pool_is_cache_safe() && !query_cache_disabled())
+	if (!partial_fetch && pool_is_cache_safe() && !query_cache_disabled())
 	{
 		SelectContext ctx;
 		MemoryContext old_context;
@@ -3782,6 +3819,12 @@ pool_handle_query_cache(POOL_CONNECTION_POOL * backend, char *query, Node *node,
 		/* Discard buffered data */
 		pool_reset_memqcache_buffer(true);
 	}
+	else if (partial_fetch)		/* cannot create cache because of partial fetch */
+	{
+		/* Discard buffered data */
+		pool_reset_memqcache_buffer(true);
+	}
+
 	else if (is_commit_query(node)) /* Commit? */
 	{
 		int			num_caches;
@@ -4600,21 +4643,24 @@ inject_cached_message(POOL_CONNECTION * backend, char *qcache, int qcachelen)
 	int			i = 0;
 	bool		is_prepared_stmt = false;
 	POOL_SESSION_CONTEXT *session_context;
-	POOL_QUERY_CONTEXT *query_context;
 	POOL_PENDING_MESSAGE *msg;
+	int			num_msgs;
+	int			msg_cnt = 0;
 
 	session_context = pool_get_session_context(false);
-	query_context = session_context->query_context;
-	msg = pool_pending_message_find_lastest_by_query_context(query_context);
+	msg = pool_pending_message_head_message();
+	num_msgs = list_length(session_context->pending_messages);
 
 	if (msg)
 	{
 		/*
-		 * If pending message found, we should extract target backend from it
+		 * If pending message found, we should extract data from the target
+		 * backend.
 		 */
 		int			backend_id;
 
 		backend_id = pool_pending_message_get_target_backend_id(msg);
+		pool_pending_message_free_pending_message(msg);
 		backend = CONNECTION(session_context->backend, backend_id);
 		timeout = -1;
 	}
@@ -4645,15 +4691,50 @@ inject_cached_message(POOL_CONNECTION * backend, char *qcache, int qcachelen)
 			pool_set_timeout(-1);
 		}
 
+		/* read one message from backend */
 		pool_read(backend, &kind, 1);
-		ereport(DEBUG1,
-				(errmsg("inject_cached_message: push message kind: '%c'", kind)));
-		if (msg &&
-			((kind == 'T' && msg->type == POOL_DESCRIBE) ||
-			 (kind == '2' && msg->type == POOL_BIND)))
+
+		/*
+		 * Count up number of received messages to compare with the number of
+		 * pending messages
+		 */
+		switch(kind)
 		{
-			/* Pending message seen. Now it is likely to end of pending data */
+			case '1':	/* parse complete */
+			case '2':	/* bind complete */
+			case '3':	/* close complete */
+			case 'C':	/* command complete */
+			case 's':	/* portal suspended */
+			case 'T':	/* row description */
+				msg_cnt++;	/* count up number of messages */
+				elog(DEBUG1, "count up message %c msg_cnt: %d", kind, msg_cnt);
+				break;
+			case 'E':	/* ErrorResponse */
+				/*
+				 * If we receive ErrorResponse, it is likely that the last
+				 * Execute caused an error and we can stop reading messsages
+				 * from backend.
+				 */
+				timeout = 0;
+				break;
+			default:
+				/* we do not count other messages */
+				break;
+		}
+
+		/*
+		 * If msg count is greater than or equal to the number of pending
+		 * messages, it is likely all necessary backend messages have been
+		 * already seen.
+		 */
+		if (msg_cnt >= num_msgs)
+		{
+			/*
+			 * Set timeout to 0 so that we do not need to wait for responses
+			 * from backend in vain.
+			 */
 			timeout = 0;
+			elog(DEBUG1, "num_msgs: %d msg_cnt: %d", num_msgs, msg_cnt);
 		}
 		pool_push(backend, &kind, sizeof(kind));
 		pool_read(backend, &len, sizeof(len));
