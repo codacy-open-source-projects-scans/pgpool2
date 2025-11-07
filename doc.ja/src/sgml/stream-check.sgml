@@ -81,6 +81,16 @@
      ストリーミングレプリケーションのチェックを行う<productname>PostgreSQL</>ユーザ名を指定します。
      デフォルトは<literal>''</literal>（空文字）です。
      このユーザはLOGIN権限を持ち、すべてのバックエンドに存在しなければなりません。
+     更にこのユーザは、<productname>PostgreSQL</productname>のスーパーユーザか、"pg_monitor"グループに所属していなければなりません。
+     <note>
+      <para>
+       <xref linkend="guc-sr-check-user">をpg_monitorグループに所属させるには、以下のSQLコマンドを<productname>PostgreSQL</productname>スーパーユーザーで実行してください（"sr_check_user"を<xref linkend="guc-sr-check-user">の設定値で置き換えてください）
+       <programlisting>
+GRANT pg_monitor TO sr_check_user;
+       </programlisting>
+       <productname>PostgreSQL</productname> 9.6にはpg_monitorグループがないので、<xref linkend="guc-sr-check-user">は<productname>PostgreSQL</productname>のスーパーユーザーでなければなりません。
+    </para>
+   </note>
     </para>
     <para>
      <!--
@@ -378,7 +388,7 @@
    </varlistentry>
 
   <varlistentry id="guc-log-standby-delay" xreflabel="log_standby_delay">
-   <term><varname>log_standby_delay</varname> (<type>string</type>)
+   <term><varname>log_standby_delay</varname> (<type>enum</type>)
     <indexterm>
      <!--
      <primary><varname>log_standby_delay</varname> configuration parameter</primary>
@@ -416,7 +426,7 @@
 
       <tbody>
        <row>
-	<entry><literal>'none'</literal></entry>
+	<entry><literal>none</literal></entry>
 	<!--
 	<entry>Never log the standby delay</entry>
 	-->
@@ -424,7 +434,7 @@
        </row>
 
        <row>
-	<entry><literal>'always'</literal></entry>
+	<entry><literal>always</literal></entry>
 	<!--
 	<entry>Log the standby delay, every time the replication delay is checked</entry>
 	-->
@@ -432,7 +442,7 @@
        </row>
 
        <row>
-	<entry><literal>'if_over_threshold'</literal></entry>
+	<entry><literal>if_over_threshold</literal></entry>
 	<!--
 	<entry>Only log the standby delay, when it exceeds <xref linkend="guc-delay-threshold"> value</entry>
 	-->

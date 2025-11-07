@@ -5,7 +5,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2024	PgPool Global Development Group
+ * Copyright (c) 2003-2025	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -68,19 +68,19 @@
 #include "auth/pool_passwd.h"
 #include "auth/pool_hba.h"
 
-static StartupPacket *read_startup_packet(POOL_CONNECTION * cp);
-static POOL_CONNECTION_POOL * connect_backend(StartupPacket *sp, POOL_CONNECTION * frontend);
+static StartupPacket *read_startup_packet(POOL_CONNECTION *cp);
+static POOL_CONNECTION_POOL *connect_backend(StartupPacket *sp, POOL_CONNECTION *frontend);
 static RETSIGTYPE die(int sig);
 static RETSIGTYPE close_idle_connection(int sig);
 static RETSIGTYPE wakeup_handler(int sig);
 static RETSIGTYPE reload_config_handler(int sig);
 static RETSIGTYPE authentication_timeout(int sig);
-static void send_params(POOL_CONNECTION * frontend, POOL_CONNECTION_POOL * backend);
+static void send_params(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend);
 static int	connection_count_up(void);
 static void connection_count_down(void);
-static bool connect_using_existing_connection(POOL_CONNECTION * frontend,
-								  POOL_CONNECTION_POOL * backend,
-								  StartupPacket *sp);
+static bool connect_using_existing_connection(POOL_CONNECTION *frontend,
+											  POOL_CONNECTION_POOL *backend,
+											  StartupPacket *sp);
 static void check_restart_request(void);
 static void check_exit_request(void);
 static void enable_authentication_timeout(void);
@@ -89,17 +89,17 @@ static int	wait_for_new_connections(int *fds, SockAddr *saddr);
 static void check_config_reload(void);
 static void get_backends_status(unsigned int *valid_backends, unsigned int *down_backends);
 static void validate_backend_connectivity(int front_end_fd);
-static POOL_CONNECTION * get_connection(int front_end_fd, SockAddr *saddr);
-static POOL_CONNECTION_POOL * get_backend_connection(POOL_CONNECTION * frontend);
+static POOL_CONNECTION *get_connection(int front_end_fd, SockAddr *saddr);
+static POOL_CONNECTION_POOL *get_backend_connection(POOL_CONNECTION *frontend);
 static StartupPacket *StartupPacketCopy(StartupPacket *sp);
 static void log_disconnections(char *database, char *username);
 static void print_process_status(char *remote_host, char *remote_port);
-static bool backend_cleanup(POOL_CONNECTION * volatile *frontend, POOL_CONNECTION_POOL * volatile backend, bool frontend_invalid);
+static bool backend_cleanup(POOL_CONNECTION *volatile *frontend, POOL_CONNECTION_POOL *volatile backend, bool frontend_invalid);
 
 static void child_will_go_down(int code, Datum arg);
-static int opt_sort(const void *a, const void *b);
+static int	opt_sort(const void *a, const void *b);
 
-static bool unix_fds_not_isset(int* fds, int num_unix_fds, fd_set* opt);
+static bool unix_fds_not_isset(int *fds, int num_unix_fds, fd_set *opt);
 
 /*
  * Non 0 means SIGTERM (smart shutdown) or SIGINT (fast shutdown) has arrived
@@ -153,14 +153,13 @@ do_child(int *fds)
 {
 	sigjmp_buf	local_sigjmp_buf;
 	POOL_CONNECTION_POOL *volatile backend = NULL;
-	struct timeval now;
-	struct timezone tz;
 
-	/* counter for child_max_connections.  "volatile" declaration is necessary
+	/*
+	 * counter for child_max_connections.  "volatile" declaration is necessary
 	 * so that this is counted up even if long jump is issued due to
 	 * ereport(ERROR).
 	 */
-	volatile	int			connections_count = 0;
+	volatile int connections_count = 0;
 
 	char		psbuf[NI_MAXHOST + 128];
 
@@ -213,15 +212,6 @@ do_child(int *fds)
 
 	/* Initialize per process context */
 	pool_init_process_context();
-
-	/* initialize random seed */
-	gettimeofday(&now, &tz);
-
-#if defined(sun) || defined(__sun)
-	srand((unsigned int) now.tv_usec);
-#else
-	srandom((unsigned int) now.tv_usec);
-#endif
 
 	/* initialize connection pool */
 	if (pool_init_cp())
@@ -366,7 +356,8 @@ do_child(int *fds)
 			 */
 			if (con_count > (pool_config->num_init_children - pool_config->reserved_connections))
 			{
-				POOL_CONNECTION * cp;
+				POOL_CONNECTION *cp;
+
 				cp = pool_open(front_end_fd, false);
 				if (cp == NULL)
 				{
@@ -416,8 +407,8 @@ do_child(int *fds)
 			pool_initialize_private_backend_status();
 
 		/*
-		 * Connect to backend. Also do authentication between
-		 * frontend <--> pgpool and pgpool <--> backend.
+		 * Connect to backend. Also do authentication between frontend <-->
+		 * pgpool and pgpool <--> backend.
 		 */
 		backend = get_backend_connection(child_frontend);
 		if (!backend)
@@ -524,7 +515,7 @@ do_child(int *fds)
  * return true if backend connection is cached
  */
 static bool
-backend_cleanup(POOL_CONNECTION * volatile *frontend, POOL_CONNECTION_POOL * volatile backend, bool frontend_invalid)
+backend_cleanup(POOL_CONNECTION *volatile *frontend, POOL_CONNECTION_POOL *volatile backend, bool frontend_invalid)
 {
 	StartupPacket *sp;
 	bool		cache_connection = false;
@@ -611,18 +602,18 @@ backend_cleanup(POOL_CONNECTION * volatile *frontend, POOL_CONNECTION_POOL * vol
  * Read the startup packet and parse the contents.
 */
 static StartupPacket *
-read_startup_packet(POOL_CONNECTION * cp)
+read_startup_packet(POOL_CONNECTION *cp)
 {
 	StartupPacket *sp;
 	StartupPacket_v2 *sp2;
 	int			protov;
 	int			len;
 	char	   *p;
-	char **guc_options;
-	int opt_num = 0;
-	char *sp_sort;
-	char *tmpopt;
-	int i;
+	char	  **guc_options;
+	int			opt_num = 0;
+	char	   *sp_sort;
+	char	   *tmpopt;
+	int			i;
 
 
 	sp = (StartupPacket *) palloc0(sizeof(*sp));
@@ -635,21 +626,23 @@ read_startup_packet(POOL_CONNECTION * cp)
 	len = ntohl(len);
 	len -= sizeof(len);
 
-	if (len <= 0 || len >= MAX_STARTUP_PACKET_LENGTH)
+	if (len < 4 || len > MAX_STARTUP_PACKET_LENGTH)
 		ereport(ERROR,
 				(errmsg("failed while reading startup packet"),
 				 errdetail("incorrect packet length (%d)", len)));
 
 	sp->startup_packet = palloc0(len);
 
-	/* read startup packet */
+	/*
+	 * Read startup packet except the length of the message.
+	 */
 	pool_read_with_error(cp, sp->startup_packet, len,
 						 "startup packet");
 
 	sp->len = len;
 	memcpy(&protov, sp->startup_packet, sizeof(protov));
-	sp->major = ntohl(protov) >> 16;
-	sp->minor = ntohl(protov) & 0x0000ffff;
+	sp->major = PG_PROTOCOL_MAJOR(ntohl(protov));
+	sp->minor = PG_PROTOCOL_MINOR(ntohl(protov));
 	cp->protoVersion = sp->major;
 
 	switch (sp->major)
@@ -668,37 +661,38 @@ read_startup_packet(POOL_CONNECTION * cp)
 		case PROTO_MAJOR_V3:	/* V3 */
 			/* copy startup_packet */
 			sp_sort = palloc0(len);
-			memcpy(sp_sort,sp->startup_packet,len);
+			memcpy(sp_sort, sp->startup_packet, len);
 
 			p = sp_sort;
-			p += sizeof(int);   /* skip protocol version info */
+			p += sizeof(int);	/* skip protocol version info */
 			/* count the number of options */
 			while (*p)
 			{
-			p += (strlen(p) + 1); /* skip option name */
-				p += (strlen(p) + 1); /* skip option value */
-				opt_num ++;
+				p += (strlen(p) + 1);	/* skip option name */
+				p += (strlen(p) + 1);	/* skip option value */
+				opt_num++;
 			}
-			guc_options = (char **)palloc0(opt_num * sizeof(char *));
+			guc_options = (char **) palloc0(opt_num * sizeof(char *));
 			/* get guc_option name list */
 			p = sp_sort + sizeof(int);
 			for (i = 0; i < opt_num; i++)
 			{
 				guc_options[i] = p;
-				p += (strlen(p) + 1); /* skip option name */
-				p += (strlen(p) + 1); /* skip option value */
+				p += (strlen(p) + 1);	/* skip option name */
+				p += (strlen(p) + 1);	/* skip option value */
 			}
 			/* sort option name using quick sort */
-			qsort( (void *)guc_options, opt_num, sizeof(char *), opt_sort );
+			qsort((void *) guc_options, opt_num, sizeof(char *), opt_sort);
 
-			p = sp->startup_packet + sizeof(int);   /* skip protocol version info */
+			p = sp->startup_packet + sizeof(int);	/* skip protocol version
+													 * info */
 			for (i = 0; i < opt_num; i++)
 			{
 				tmpopt = guc_options[i];
-				memcpy(p, tmpopt ,strlen(tmpopt) + 1); /* memcpy option name */
+				memcpy(p, tmpopt, strlen(tmpopt) + 1);	/* memcpy option name */
 				p += (strlen(tmpopt) + 1);
 				tmpopt += (strlen(tmpopt) + 1);
-				memcpy(p, tmpopt ,strlen(tmpopt) + 1); /* memcpy option value */
+				memcpy(p, tmpopt, strlen(tmpopt) + 1);	/* memcpy option value */
 				p += (strlen(tmpopt) + 1);
 			}
 
@@ -742,7 +736,7 @@ read_startup_packet(POOL_CONNECTION * cp)
 				{
 					ereport(DEBUG1,
 							(errmsg("reading startup packet"),
-							 errdetail("guc name: %s value: %s", p, p+strlen(p)+1)));
+							 errdetail("guc name: %s value: %s", p, p + strlen(p) + 1)));
 					p += (strlen(p) + 1);
 
 				}
@@ -778,8 +772,11 @@ read_startup_packet(POOL_CONNECTION * cp)
 	}
 
 	/* The database defaults to their user name. */
-	if (sp->database == NULL || sp->database[0] == '\0')
+	if (sp->database == NULL)
+		sp->database = pstrdup(sp->user);
+	else if (sp->database[0] == '\0')
 	{
+		pfree(sp->database);
 		sp->database = pstrdup(sp->user);
 	}
 
@@ -798,8 +795,8 @@ read_startup_packet(POOL_CONNECTION * cp)
  * Reuse existing connection
  */
 static bool
-connect_using_existing_connection(POOL_CONNECTION * frontend,
-								  POOL_CONNECTION_POOL * backend,
+connect_using_existing_connection(POOL_CONNECTION *frontend,
+								  POOL_CONNECTION_POOL *backend,
 								  StartupPacket *sp)
 {
 	int			i,
@@ -833,8 +830,8 @@ connect_using_existing_connection(POOL_CONNECTION * frontend,
 
 	/* Reuse existing connection to backend */
 	frontend_auth_cxt = AllocSetContextCreate(CurrentMemoryContext,
-															"frontend_auth",
-															ALLOCSET_DEFAULT_SIZES);
+											  "frontend_auth",
+											  ALLOCSET_DEFAULT_SIZES);
 	oldContext = MemoryContextSwitchTo(frontend_auth_cxt);
 
 	pool_do_reauth(frontend, backend);
@@ -844,49 +841,7 @@ connect_using_existing_connection(POOL_CONNECTION * frontend,
 
 	if (MAJOR(backend) == 3)
 	{
-		char		command_buf[1024];
-
-		/*
-		 * If we have received application_name in the start up packet, we
-		 * send SET command to backend. Also we add or replace existing
-		 * application_name data.
-		 */
-		if (sp->application_name)
-		{
-			snprintf(command_buf, sizeof(command_buf), "SET application_name TO '%s'", sp->application_name);
-
-			for (i = 0; i < NUM_BACKENDS; i++)
-			{
-				if (VALID_BACKEND(i))
-				{
-					/*
-					 * We want to catch and ignore errors in do_command if a
-					 * backend is just going down right now. Otherwise
-					 * do_command raises an error and disconnects the
-					 * connection to frontend. We can safely ignore error from
-					 * "SET application_name" command if the backend goes
-					 * down.
-					 */
-					PG_TRY();
-					{
-						do_command(frontend, CONNECTION(backend, i),
-								   command_buf, MAJOR(backend),
-								   MAIN_CONNECTION(backend)->pid,
-								   MAIN_CONNECTION(backend)->key, 0);
-					}
-					PG_CATCH();
-					{
-						/* ignore the error message */
-						MemoryContextSwitchTo(oldContext);
-						FlushErrorState();
-					}
-					PG_END_TRY();
-				}
-			}
-			pool_add_param(&MAIN(backend)->params, "application_name", sp->application_name);
-			set_application_name_with_string(sp->application_name);
-		}
-
+		/* Send parameter status message to frontend. */
 		send_params(frontend, backend);
 	}
 
@@ -913,7 +868,7 @@ connect_using_existing_connection(POOL_CONNECTION * frontend,
  * process cancel request
  */
 void
-cancel_request(CancelPacket * sp)
+cancel_request(CancelPacket *sp, int32 splen)
 {
 	int			len;
 	int			fd;
@@ -922,8 +877,8 @@ cancel_request(CancelPacket * sp)
 				j,
 				k;
 	ConnectionInfo *c = NULL;
-	CancelPacket cp;
 	bool		found = false;
+	int32		keylen;			/* cancel key length */
 
 	if (pool_config->log_client_messages)
 		ereport(LOG,
@@ -932,7 +887,20 @@ cancel_request(CancelPacket * sp)
 	ereport(DEBUG1,
 			(errmsg("Cancel request received")));
 
-	/* look for cancel key from shmem info */
+	/*
+	 * Cancel key length is cancel message length - cancel request code -
+	 * process id.
+	 */
+	keylen = splen - sizeof(int32) - sizeof(int32);
+
+	/*
+	 * Look for cancel key from shmem info.  Frontend should have saved one of
+	 * cancel key among backend groups and sent it in the cancel request
+	 * message. We are looking for the backend which has the same cancel key
+	 * and pid. The query we want to cancel should have been running one the
+	 * backend group. So some of query cancel requests may not work but it
+	 * should not be a problem. They are just ignored by the backend.
+	 */
 	for (i = 0; i < pool_config->num_init_children; i++)
 	{
 		for (j = 0; j < pool_config->max_pool; j++)
@@ -942,14 +910,20 @@ cancel_request(CancelPacket * sp)
 				c = pool_coninfo(i, j, k);
 				ereport(DEBUG2,
 						(errmsg("processing cancel request"),
-						 errdetail("connection info: address:%p database:%s user:%s pid:%d key:%d i:%d",
-								   c, c->database, c->user, ntohl(c->pid), ntohl(c->key), i)));
-				if (c->pid == sp->pid && c->key == sp->key)
+						 errdetail("connection info: address:%p database:%s user:%s pid:%d sp.pid:%d keylen:%d sp.keylen:%d i:%d",
+								   c, c->database, c->user, ntohl(c->pid), ntohl(sp->pid),
+								   c->keylen, keylen, i)));
+				if (c->pid == sp->pid && c->keylen == keylen &&
+					memcmp(c->key, sp->key, keylen) == 0)
 				{
 					ereport(DEBUG1,
 							(errmsg("processing cancel request"),
-							 errdetail("found pid:%d key:%d i:%d", ntohl(c->pid), ntohl(c->key), i)));
+							 errdetail("found pid:%d keylen:%d i:%d", ntohl(c->pid), c->keylen, i)));
 
+					/*
+					 * "c" is a pointer to i th child, j th pool, and 0 th
+					 * backend.
+					 */
 					c = pool_coninfo(i, j, 0);
 					found = true;
 					goto found;
@@ -962,12 +936,19 @@ found:
 	if (!found)
 	{
 		ereport(LOG,
-				(errmsg("invalid cancel key: pid:%d key:%d", ntohl(sp->pid), ntohl(sp->key))));
+				(errmsg("invalid cancel key: pid:%d keylen:%d", ntohl(sp->pid), keylen)));
 		return;					/* invalid key */
 	}
 
+	/*
+	 * We are sending cancel request message to all backend groups.  So some
+	 * of query cancel requests may not work but it should not be a problem.
+	 * They are just ignored by the backend.
+	 */
 	for (i = 0; i < NUM_BACKENDS; i++, c++)
 	{
+		int32		cancel_request_code;
+
 		if (!VALID_BACKEND(i))
 			continue;
 
@@ -989,18 +970,19 @@ found:
 
 		pool_set_db_node_id(con, i);
 
-		len = htonl(sizeof(len) + sizeof(CancelPacket));
-		pool_write(con, &len, sizeof(len));
-
-		cp.protoVersion = sp->protoVersion;
-		cp.pid = c->pid;
-		cp.key = c->key;
+		len = htonl(splen + sizeof(int32)); /* splen does not include packet
+											 * length field */
+		pool_write(con, &len, sizeof(len)); /* send cancel messages length */
+		cancel_request_code = htonl(PG_PROTOCOL(1234, 5678));	/* cancel request code */
+		pool_write(con, &cancel_request_code, sizeof(int32));
+		pool_write(con, &c->pid, sizeof(int32));	/* send pid */
+		pool_write(con, c->key, keylen);	/* send cancel key */
 
 		ereport(LOG,
-				(errmsg("forwarding cancel request to backend"),
-				 errdetail("canceling backend pid:%d key: %d", ntohl(cp.pid), ntohl(cp.key))));
+				(errmsg("forwarding cancel request to backend %d", i),
+				 errdetail("canceling backend pid: %d keylen: %d", ntohl(sp->pid), keylen)));
 
-		if (pool_write_and_flush_noerror(con, &cp, sizeof(CancelPacket)) < 0)
+		if (pool_flush_noerror(con) < 0)
 			ereport(WARNING,
 					(errmsg("failed to send cancel request to backend %d", i)));
 
@@ -1051,11 +1033,12 @@ StartupPacketCopy(StartupPacket *sp)
  * Create a new connection to backend.
  * Authentication is performed if requested by backend.
  */
-static POOL_CONNECTION_POOL * connect_backend(StartupPacket *sp, POOL_CONNECTION * frontend)
+static POOL_CONNECTION_POOL *
+connect_backend(StartupPacket *sp, POOL_CONNECTION *frontend)
 {
 	POOL_CONNECTION_POOL *backend;
 	StartupPacket *volatile topmem_sp = NULL;
-	volatile bool	topmem_sp_set = false;
+	volatile bool topmem_sp_set = false;
 	int			i;
 
 	/* connect to the backend */
@@ -1105,8 +1088,8 @@ static POOL_CONNECTION_POOL * connect_backend(StartupPacket *sp, POOL_CONNECTION
 		 * do authentication stuff
 		 */
 		frontend_auth_cxt = AllocSetContextCreate(CurrentMemoryContext,
-																"frontend_auth",
-																ALLOCSET_DEFAULT_SIZES);
+												  "frontend_auth",
+												  ALLOCSET_DEFAULT_SIZES);
 		oldContext = MemoryContextSwitchTo(frontend_auth_cxt);
 
 		/* do authentication against backend */
@@ -1124,7 +1107,8 @@ static POOL_CONNECTION_POOL * connect_backend(StartupPacket *sp, POOL_CONNECTION
 	}
 	PG_END_TRY();
 
-	/* At this point, we need to free previously allocated memory for the
+	/*
+	 * At this point, we need to free previously allocated memory for the
 	 * startup packet if no backend is up.
 	 */
 	if (!topmem_sp_set && topmem_sp != NULL)
@@ -1227,7 +1211,7 @@ static RETSIGTYPE close_idle_connection(int sig)
 
 		if (CONNECTION_SLOT(p, main_node_id)->closetime > 0)	/* idle connection? */
 		{
-			bool	freed = false;
+			bool		freed = false;
 
 			pool_send_frontend_exits(p);
 
@@ -1296,7 +1280,7 @@ disable_authentication_timeout(void)
  * Send parameter status message to frontend.
  */
 static void
-send_params(POOL_CONNECTION * frontend, POOL_CONNECTION_POOL * backend)
+send_params(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend)
 {
 	int			index;
 	char	   *name,
@@ -1313,6 +1297,8 @@ send_params(POOL_CONNECTION * frontend, POOL_CONNECTION_POOL * backend)
 		pool_write(frontend, &sendlen, sizeof(sendlen));
 		pool_write(frontend, name, strlen(name) + 1);
 		pool_write(frontend, value, strlen(value) + 1);
+		elog(DEBUG1, "send parameter status message to frontend: \"%s\" = \"%s\"",
+			 name, value);
 	}
 
 	if (pool_flush(frontend))
@@ -1346,7 +1332,7 @@ child_will_go_down(int code, Datum arg)
 			if (child_frontend)
 				log_disconnections(child_frontend->database, child_frontend->username);
 			else
-				log_disconnections("","");
+				log_disconnections("", "");
 		}
 	}
 
@@ -1577,7 +1563,7 @@ wait_for_new_connections(int *fds, SockAddr *saddr)
 		}
 		else
 		{
-			int sts;
+			int			sts;
 
 			for (;;)
 			{
@@ -1592,10 +1578,10 @@ wait_for_new_connections(int *fds, SockAddr *saddr)
 					if (backend_timer_expired)
 					{
 						/*
-						 * We add 10 seconds to connection_life_time so that there's
-						 * enough margin.
+						 * We add 10 seconds to connection_life_time so that
+						 * there's enough margin.
 						 */
-						int	seconds = pool_config->connection_life_time + 10;
+						int			seconds = pool_config->connection_life_time + 10;
 
 						while (seconds-- > 0)
 						{
@@ -1610,7 +1596,7 @@ wait_for_new_connections(int *fds, SockAddr *saddr)
 						}
 					}
 				}
-				else	/* success or other error */
+				else			/* success or other error */
 					break;
 			}
 		}
@@ -1644,7 +1630,7 @@ wait_for_new_connections(int *fds, SockAddr *saddr)
 
 		numfds = select(nsocks, &rmask, NULL, NULL, timeout);
 
-		/* not timeout*/
+		/* not timeout */
 		if (numfds != 0)
 			break;
 
@@ -1779,9 +1765,10 @@ retry_accept:
 }
 
 static bool
-unix_fds_not_isset(int* fds, int num_unix_fds, fd_set* opt)
+unix_fds_not_isset(int *fds, int num_unix_fds, fd_set *opt)
 {
-	int		i;
+	int			i;
+
 	for (i = 0; i < num_unix_fds; i++)
 	{
 		if (!FD_ISSET(fds[i], opt))
@@ -1883,7 +1870,7 @@ validate_backend_connectivity(int front_end_fd)
 										error_hint,
 										__FILE__,
 										__LINE__);
-				
+
 			}
 			PG_CATCH();
 			{
@@ -1909,11 +1896,18 @@ static POOL_CONNECTION *
 get_connection(int front_end_fd, SockAddr *saddr)
 {
 	POOL_CONNECTION *cp;
+	ProcessInfo *pi;
 
 	ereport(DEBUG1,
 			(errmsg("I am %d accept fd %d", getpid(), front_end_fd)));
 
 	pool_getnameinfo_all(saddr, remote_host, remote_port);
+
+	/* save remote client host and port info onto shared memory */
+	pi = pool_get_my_process_info();
+	StrNCpy(pi->client_host, remote_host, NI_MAXHOST);
+	StrNCpy(pi->client_port, remote_port, NI_MAXSERV);
+
 	print_process_status(remote_host, remote_port);
 
 	set_ps_display("accept connection", false);
@@ -1969,7 +1963,7 @@ get_connection(int front_end_fd, SockAddr *saddr)
  * pgpool <--> backend.
  */
 static POOL_CONNECTION_POOL *
-get_backend_connection(POOL_CONNECTION * frontend)
+get_backend_connection(POOL_CONNECTION *frontend)
 {
 	int			found = 0;
 	StartupPacket *sp;
@@ -1982,7 +1976,7 @@ retry_startup:
 	/* cancel request? */
 	if (sp->major == 1234 && sp->minor == 5678)
 	{
-		cancel_request((CancelPacket *) sp->startup_packet);
+		cancel_request((CancelPacket *) sp->startup_packet, sp->len);
 		pool_free_startup_packet(sp);
 		connection_count_down();
 		return NULL;
@@ -2025,8 +2019,8 @@ retry_startup:
 		 * return if frontend was rejected; it simply terminates this process.
 		 */
 		MemoryContext frontend_auth_cxt = AllocSetContextCreate(CurrentMemoryContext,
-										"frontend_auth",
-										ALLOCSET_DEFAULT_SIZES);
+																"frontend_auth",
+																ALLOCSET_DEFAULT_SIZES);
 		MemoryContext oldContext = MemoryContextSwitchTo(frontend_auth_cxt);
 
 		/*
@@ -2109,8 +2103,8 @@ retry_startup:
 	if (backend == NULL)
 	{
 		/*
-		 * Create a new connection to backend.
-		 * Authentication is performed if requested by backend.
+		 * Create a new connection to backend. Authentication is performed if
+		 * requested by backend.
 		 */
 		backend = connect_backend(sp, frontend);
 	}
@@ -2129,7 +2123,7 @@ static void
 log_disconnections(char *database, char *username)
 {
 	struct timeval endTime;
-	long diff;
+	long		diff;
 	long		secs;
 	int			msecs,
 				hours,
@@ -2137,7 +2131,7 @@ log_disconnections(char *database, char *username)
 				seconds;
 
 	gettimeofday(&endTime, NULL);
-	diff = (long) ((endTime.tv_sec - startTime.tv_sec) * 1000000  + (endTime.tv_usec - startTime.tv_usec));
+	diff = (long) ((endTime.tv_sec - startTime.tv_sec) * 1000000 + (endTime.tv_usec - startTime.tv_usec));
 
 	msecs = (int) (diff % 1000000) / 1000;
 	secs = (long) (diff / 1000000);
@@ -2209,9 +2203,10 @@ pg_frontend_exists(void)
 	return 0;
 }
 
-static int opt_sort(const void *a, const void *b)
+static int
+opt_sort(const void *a, const void *b)
 {
-	return strcmp( *(char **)a, *(char **)b);
+	return strcmp(*(char **) a, *(char **) b);
 }
 
 void

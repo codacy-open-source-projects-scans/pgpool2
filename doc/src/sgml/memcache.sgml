@@ -99,6 +99,19 @@
   </para>
  </note>
 
+ <note>
+  <para>
+   If multiple functions having the same name are registered and one
+   of them returns TIMESTAMP WITH TIMEZONE or TIME WITH
+   TIMEZONE, <productname>Pgpool-II</productname> thinks that the
+   query cannot be cached even if it uses a version of function which
+   does not return TIMESTAMP WITH TIMEZONE or TIME WITH TIMEZONE. In
+   this case you can create a wrapper function returning TIMESTAMP
+   WITHOUT TIMEZONE or TIME WITHOUT TIMEZONE, or use /*FORCE QUERY
+   CACHE*/ comment so that you can use the query cache.
+  </para>
+ </note>
+
  <para>
   On the other hand, it might be slower than the normal path
   in some cases, because it adds some overhead to store cache.
@@ -179,7 +192,7 @@
   <variablelist>
 
    <varlistentry id="guc-memqcache-method" xreflabel="memqcache_method">
-    <term><varname>memqcache_method</varname> (<type>string</type>)
+    <term><varname>memqcache_method</varname> (<type>enum</type>)
      <indexterm>
       <primary><varname>memqcache_method</varname> configuration parameter</primary>
      </indexterm>
@@ -202,12 +215,12 @@
 
        <tbody>
 	<row>
-	 <entry><literal>'shmem'</literal></entry>
+	 <entry><literal>shmem</literal></entry>
 	 <entry>Use shared memory</entry>
 	</row>
 
 	<row>
-	 <entry><literal>'memcached'</literal></entry>
+	 <entry><literal>memcached</literal></entry>
 	 <entry>Use <ulink url="http://memcached.org/">memcached</ulink></entry>
 	</row>
 
@@ -232,7 +245,7 @@
       If you are not sure which memqcache_method to be used, start with <varname>shmem</varname>.
      </para>
      <para>
-      Default is <literal>'shmem'</literal>.
+      Default is <literal>shmem</literal>.
      </para>
 
      <para>
@@ -453,7 +466,7 @@
       </para>
      </note>
      <para>
-      This parameter can be changed by reloading the <productname>Pgpool-II</productname> configurations.
+      This parameter can only be set at server start.
      </para>
     </listitem>
    </varlistentry>

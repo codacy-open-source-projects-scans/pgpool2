@@ -5,7 +5,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2024	PgPool Global Development Group
+ * Copyright (c) 2003-2025	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -68,9 +68,10 @@
 #include "auth/md5.h"
 #include "auth/pool_hba.h"
 
-volatile POOL_HEALTH_CHECK_STATISTICS	*health_check_stats;	/* health check stats area in shared memory */
+volatile POOL_HEALTH_CHECK_STATISTICS *health_check_stats;	/* health check stats
+															 * area in shared memory */
 
-static POOL_CONNECTION_POOL_SLOT * slot;
+static POOL_CONNECTION_POOL_SLOT *slot;
 static volatile sig_atomic_t reload_config_request = 0;
 static volatile sig_atomic_t restart_request = 0;
 volatile POOL_HEALTH_CHECK_STATISTICS *stats;
@@ -108,27 +109,30 @@ static bool check_backend_down_request(int node, bool done_requests);
 * health check child main loop
 */
 void
-do_health_check_child(int *node_id)
+do_health_check_child(void *params)
 {
 	sigjmp_buf	local_sigjmp_buf;
 	MemoryContext HealthCheckMemoryContext;
 	char		psbuffer[NI_MAXHOST];
-	static struct timeval	start_time;
-	static struct timeval	end_time;
-	long	diff_t;
+	static struct timeval start_time;
+	static struct timeval end_time;
+	long		diff_t;
+	int			node_id;
 
-	POOL_HEALTH_CHECK_STATISTICS	mystat;
-	stats = &health_check_stats[*node_id];
+	POOL_HEALTH_CHECK_STATISTICS mystat;
+
+	node_id = *((int *) params);
+	stats = &health_check_stats[node_id];
 
 	/* Set application name */
-	set_application_name_with_suffix(PT_HEALTH_CHECK, *node_id);
+	set_application_name_with_suffix(PT_HEALTH_CHECK, node_id);
 
 	ereport(DEBUG1,
-			(errmsg("I am health check process pid:%d DB node id:%d", getpid(), *node_id)));
+			(errmsg("I am health check process pid:%d DB node id:%d", getpid(), node_id)));
 
 	/* Identify myself via ps */
 	init_ps_display("", "", "", "");
-	snprintf(psbuffer, sizeof(psbuffer), "health check process(%d)", *node_id);
+	snprintf(psbuffer, sizeof(psbuffer), "health check process(%d)", node_id);
 	set_ps_display(psbuffer, false);
 
 	/* set up signal handlers */
@@ -180,17 +184,18 @@ do_health_check_child(int *node_id)
 	{
 		MemoryContextSwitchTo(HealthCheckMemoryContext);
 		MemoryContextResetAndDeleteChildren(HealthCheckMemoryContext);
+
 		/*
-		 * Since HealthCheckMemoryContext is used for "slot", we need to clear it
-		 * so that new slot is allocated later on.
+		 * Since HealthCheckMemoryContext is used for "slot", we need to clear
+		 * it so that new slot is allocated later on.
 		 */
 		slot = NULL;
 
-		bool	skipped = false;
+		bool		skipped = false;
 
 		CHECK_REQUEST;
 
-		if (pool_config->health_check_params[*node_id].health_check_period <= 0)
+		if (pool_config->health_check_params[node_id].health_check_period <= 0)
 		{
 			stats->min_health_check_duration = 0;
 			sleep(30);
@@ -200,27 +205,27 @@ do_health_check_child(int *node_id)
 		 * If health checking is enabled and the node is not in down status,
 		 * do health check.
 		 */
-		else if (pool_config->health_check_params[*node_id].health_check_period > 0)
+		else if (pool_config->health_check_params[node_id].health_check_period > 0)
 		{
 			bool		result;
-			BackendInfo *bkinfo = pool_get_node_info(*node_id);
+			BackendInfo *bkinfo = pool_get_node_info(node_id);
 
 			stats->total_count++;
 			gettimeofday(&start_time, NULL);
 
 			stats->last_health_check = time(NULL);
 
-			result = establish_persistent_connection(*node_id);
+			result = establish_persistent_connection(node_id);
 
 			if (result && slot == NULL)
 			{
 				stats->last_failed_health_check = time(NULL);
 
-				if (POOL_DISALLOW_TO_FAILOVER(BACKEND_INFO(*node_id).flag))
+				if (POOL_DISALLOW_TO_FAILOVER(BACKEND_INFO(node_id).flag))
 				{
 					ereport(LOG,
 							(errmsg("health check failed on node %d but failover is disallowed for the node",
-									*node_id)));
+									node_id)));
 				}
 				else
 				{
@@ -229,19 +234,19 @@ do_health_check_child(int *node_id)
 					stats->fail_count++;
 
 					ereport(LOG, (errmsg("health check failed on node %d (timeout:%d)",
-										 *node_id, health_check_timer_expired)));
+										 node_id, health_check_timer_expired)));
 
 					if (bkinfo->backend_status == CON_DOWN && bkinfo->quarantine == true)
 					{
 						ereport(LOG, (errmsg("health check failed on quarantine node %d (timeout:%d)",
-											 *node_id, health_check_timer_expired),
+											 node_id, health_check_timer_expired),
 									  errdetail("ignoring..")));
 					}
 					else
 					{
 						/* trigger failover */
 						partial = health_check_timer_expired ? false : true;
-						degenerate_backend_set(node_id, 1, partial ? REQ_DETAIL_SWITCHOVER : 0);
+						degenerate_backend_set(&node_id, 1, partial ? REQ_DETAIL_SWITCHOVER : 0);
 					}
 				}
 			}
@@ -250,10 +255,11 @@ do_health_check_child(int *node_id)
 				stats->success_count++;
 				stats->last_successful_health_check = time(NULL);
 
-				/* The node has become reachable again. Reset
-				 * the quarantine state
+				/*
+				 * The node has become reachable again. Reset the quarantine
+				 * state
 				 */
-				send_failback_request(*node_id, false, REQ_DETAIL_UPDATE | REQ_DETAIL_WATCHDOG);
+				send_failback_request(node_id, false, REQ_DETAIL_UPDATE | REQ_DETAIL_WATCHDOG);
 			}
 			else if (result && slot)
 			{
@@ -270,12 +276,12 @@ do_health_check_child(int *node_id)
 			}
 
 			/* Discard persistent connections */
-			discard_persistent_connection(*node_id);
+			discard_persistent_connection(node_id);
 
 			/*
-			 Update health check duration only if health check was not skipped
-			 since the duration could be very small (probably 0) if health
-			 check is skipped.
+			 * Update health check duration only if health check was not
+			 * skipped since the duration could be very small (probably 0) if
+			 * health check is skipped.
 			 */
 
 			if (!skipped)
@@ -296,9 +302,9 @@ do_health_check_child(int *node_id)
 					stats->min_health_check_duration = diff_t;
 			}
 
-			memcpy(&mystat, (void *)stats, sizeof(mystat));
+			memcpy(&mystat, (void *) stats, sizeof(mystat));
 
-			sleep(pool_config->health_check_params[*node_id].health_check_period);
+			sleep(pool_config->health_check_params[node_id].health_check_period);
 		}
 	}
 	exit(0);
@@ -313,18 +319,19 @@ establish_persistent_connection(int node)
 {
 	BackendInfo *bkinfo;
 	int			retry_cnt;
-	static time_t auto_failback_interval = 0; /* resume time of auto_failback */
+	static time_t auto_failback_interval = 0;	/* resume time of
+												 * auto_failback */
 	bool		check_failback = false;
 	time_t		now;
-	char		*dbname;
+	char	   *dbname;
 
 	bkinfo = pool_get_node_info(node);
 
 	/*
-	 * If the node is already in down status or unused, do nothing.
-	 * except when the node state is down because of quarantine operation
-	 * since we want to detect when the node comes back to life again to
-	 * remove it from the quarantine state
+	 * If the node is already in down status or unused, do nothing. except
+	 * when the node state is down because of quarantine operation since we
+	 * want to detect when the node comes back to life again to remove it from
+	 * the quarantine state
 	 */
 	if (bkinfo->backend_status == CON_UNUSED ||
 		(bkinfo->backend_status == CON_DOWN && bkinfo->quarantine == false))
@@ -335,9 +342,9 @@ establish_persistent_connection(int node)
 		if (pool_config->auto_failback && auto_failback_interval < now &&
 			STREAM && !strcmp(bkinfo->replication_state, "streaming") && !Req_info->switching)
 		{
-				ereport(DEBUG1,
-						(errmsg("health check DB node: %d (status:%d) for auto_failback", node, bkinfo->backend_status)));
-				check_failback = true;
+			ereport(DEBUG1,
+					(errmsg("health check DB node: %d (status:%d) for auto_failback", node, bkinfo->backend_status)));
+			check_failback = true;
 		}
 		else
 			return false;
@@ -432,7 +439,7 @@ establish_persistent_connection(int node)
 
 		if (retry_cnt != pool_config->health_check_params[node].health_check_max_retries)
 		{
-			int ret_cnt;
+			int			ret_cnt;
 
 			retry_cnt++;
 			ret_cnt = pool_config->health_check_params[node].health_check_max_retries - retry_cnt;
@@ -446,13 +453,13 @@ establish_persistent_connection(int node)
 
 		if (check_failback && !Req_info->switching && slot)
 		{
-				ereport(LOG,
+			ereport(LOG,
 					(errmsg("request auto failback, node id:%d", node)));
-				/* get current time to use auto_failback_interval */
-				now = time(NULL);
-				auto_failback_interval = now + pool_config->auto_failback_interval;
+			/* get current time to use auto_failback_interval */
+			now = time(NULL);
+			auto_failback_interval = now + pool_config->auto_failback_interval;
 
-				send_failback_request(node, true, REQ_DETAIL_CONFIRMED);
+			send_failback_request(node, true, REQ_DETAIL_CONFIRMED);
 		}
 	}
 
@@ -527,6 +534,10 @@ reload_config(void)
 	MemoryContextSwitchTo(oldContext);
 	if (pool_config->enable_pool_hba)
 		load_hba(get_hba_file_name());
+
+	if (strcmp("", pool_config->pool_passwd))
+		pool_reopen_passwd_file();
+
 	reload_config_request = 0;
 }
 
@@ -549,10 +560,10 @@ static RETSIGTYPE health_check_timer_handler(int sig)
 size_t
 health_check_stats_shared_memory_size(void)
 {
-	size_t	size;
+	size_t		size;
 
-	size =  MAXALIGN(sizeof(POOL_HEALTH_CHECK_STATISTICS) * MAX_NUM_BACKENDS);
-	elog(LOG, "health_check_stats_shared_memory_size: requested size: %lu", size);
+	size = MAXALIGN(sizeof(POOL_HEALTH_CHECK_STATISTICS) * MAX_NUM_BACKENDS);
+	elog(DEBUG1, "health_check_stats_shared_memory_size: requested size: %lu", size);
 	return size;
 }
 
@@ -562,12 +573,12 @@ health_check_stats_shared_memory_size(void)
 void
 health_check_stats_init(POOL_HEALTH_CHECK_STATISTICS *addr)
 {
-	int	i;
+	int			i;
 
 	health_check_stats = addr;
 	memset((void *) health_check_stats, 0, health_check_stats_shared_memory_size());
 
-	for (i = 0 ;i < MAX_NUM_BACKENDS; i++)
+	for (i = 0; i < MAX_NUM_BACKENDS; i++)
 	{
 		health_check_stats[i].min_health_check_duration = INT_MAX;
 	}
@@ -609,7 +620,7 @@ check_backend_down_request(int node, bool done_requests)
 	if (backend_down_request_file[0] == '\0')
 	{
 		snprintf(backend_down_request_file, sizeof(backend_down_request_file),
-				 "%s/%s", pool_config->logdir, BACKEND_DOWN_REQUEST_FILE);
+				 "%s/%s", pool_config->work_dir, BACKEND_DOWN_REQUEST_FILE);
 	}
 
 	fd = fopen(backend_down_request_file, "r");

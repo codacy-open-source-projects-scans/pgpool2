@@ -65,7 +65,13 @@ $PSQL -h localhost test <<EOF > result
 \q
 EOF
 
-grep SSL result
+# PostgreSQL 18 or later prints tablular output for \conninfo.
+# For SSL, "SSL Connection | true (or false)"
+if [ $PGVERSION -ge 18 ];then
+    grep "SSL Connection" result|grep true
+else
+    grep SSL result
+fi
 
 if [ $? != 0 ];then
     echo "Checking SSL connection between frontend and Pgpool-II failed."
@@ -75,7 +81,11 @@ fi
 
 echo "Checking SSL connection between frontend and Pgpool-II was ok."
 
-grep SSL result |grep TLSv1.2
+if [ $PGVERSION -ge 18 ];then
+    grep "SSL Protocol" result|grep TLSv1.2
+else
+    grep SSL result |grep TLSv1.2
+fi
 
 # if SSl protocol version TLSv1.2
 if [ $? = 0 ];then
@@ -99,4 +109,53 @@ fi
 echo "Checking SSL connection between Pgpool-II and backend was ok."
 
 ./shutdownall
+
+# Checking ssl_ecdh_curve. Set bad value to see if SSL connection fails.
+echo "ssl_ecdh_curve = 'badcurve'" >> etc/pgpool.conf
+
+./startall
+wait_for_pgpool_startup
+
+$PSQL -h localhost test <<EOF > result
+\conninfo
+\q
+EOF
+
+if [ $PGVERSION -ge 18 ];then
+    grep "SSL Connection" result|grep true
+else
+    grep SSL result
+fi
+
+if [ $? = 0 ];then
+    echo "Checking SSL connection between frontend and Pgpool-II succeeded despite bad ssl_ecdh_curve."
+    ./shutdownall
+    exit 1
+fi
+
+echo "Checking SSL connection between frontend and Pgpool-II failed due to bad ssl_ecdh_curve as expected."
+./shutdownall
+
+# Make sure that SSL connection succeeds with good ssl_ecdh_curve
+echo "ssl_ecdh_curve = 'prime256v1'" >> etc/pgpool.conf
+
+./startall
+wait_for_pgpool_startup
+
+$PSQL -h localhost test <<EOF > result
+\conninfo
+\q
+EOF
+
+grep SSL result
+
+if [ $? = 0 ];then
+    echo "Checking SSL connection between frontend and Pgpool-II succeeded with good ssl_ecdh_curve."
+    ./shutdownall
+else
+    echo "Checking SSL connection between frontend and Pgpool-II failed with good ssl_ecdh_curve."
+    ./shutdownall
+    exit 1
+fi
+
 exit 0

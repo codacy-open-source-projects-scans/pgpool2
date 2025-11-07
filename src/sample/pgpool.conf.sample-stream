@@ -1,6 +1,6 @@
-# ----------------------------
-# pgPool-II configuration file
-# ----------------------------
+# --------------------------------
+# Pgpool-II 4.7 configuration file
+# --------------------------------
 #
 # This file consists of lines of the form:
 #
@@ -19,12 +19,12 @@
 
 #------------------------------------------------------------------------------
 # BACKEND CLUSTERING MODE
-# Choose one of: 'streaming_replication', 'native_replication',
-#	'logical_replication', 'slony', 'raw' or 'snapshot_isolation'
+# Choose one of: streaming_replication, native_replication,
+#	logical_replication, raw or snapshot_isolation
 # (change requires restart)
 #------------------------------------------------------------------------------
 
-backend_clustering_mode = 'streaming_replication'
+backend_clustering_mode = streaming_replication
 
 #------------------------------------------------------------------------------
 # CONNECTIONS
@@ -114,6 +114,7 @@ backend_clustering_mode = 'streaming_replication'
 #authentication_timeout = 1min
                                    # Delay in seconds to complete client authentication
                                    # 0 means no timeout.
+                                   # (change requires restart)
 
 #allow_clear_text_frontend_auth = off
                                    # Allow Pgpool-II to use clear text password authentication
@@ -243,7 +244,7 @@ backend_clustering_mode = 'streaming_replication'
                                    # Log connections
 #log_disconnections = off
                                    # Log disconnections
-#log_pcp_processes = on
+#log_pcp_processes = off
                                    # Log PCP Processes
 #log_hostname = off
                                    # Hostname will be shown in ps status
@@ -261,7 +262,7 @@ backend_clustering_mode = 'streaming_replication'
                                    # Log any backend messages
                                    # Valid values are none, terse and verbose
 
-#log_standby_delay = 'if_over_threshold'
+#log_standby_delay = if_over_threshold
                                    # Log standby delay
                                    # Valid values are combinations of always,
                                    # if_over_threshold, none
@@ -350,8 +351,8 @@ backend_clustering_mode = 'streaming_replication'
                                    # location of pgpool.conf file or
                                    # as an absolute path
                                    # (change requires restart)
-#logdir = '/tmp'
-                                   # Directory of pgPool status file
+#work_dir = '/tmp'
+                                   # Directory for pgpool_status and lock files.
                                    # (change requires restart)
 
 
@@ -456,33 +457,33 @@ backend_clustering_mode = 'streaming_replication'
                                    # If off, SQL comments effectively prevent the judgment
                                    # (pre 3.4 behavior).
 
-#disable_load_balance_on_write = 'transaction'
+#disable_load_balance_on_write = transaction
                                    # Load balance behavior when write query is issued
                                    # in an explicit transaction.
                                    #
                                    # Valid values:
                                    #
-                                   # 'transaction' (default):
+                                   # transaction (default):
                                    #     if a write query is issued, subsequent
                                    #     read queries will not be load balanced
                                    #     until the transaction ends.
                                    #
-                                   # 'trans_transaction':
+                                   # trans_transaction:
                                    #     if a write query is issued, subsequent
                                    #     read queries in an explicit transaction
                                    #     will not be load balanced until the session ends.
                                    #
-                                   # 'dml_adaptive':
+                                   # dml_adaptive:
                                    #     Queries on the tables that have already been
                                    #     modified within the current explicit transaction will
                                    #     not be load balanced until the end of the transaction.
                                    #
-                                   # 'always':
+                                   # always:
                                    #     if a write query is issued, read queries will
                                    #     not be load balanced until the session ends.
                                    #
                                    # Note that any query not in an explicit transaction
-                                   # is not affected by the parameter except 'always'.
+                                   # is not affected by the parameter except always.
 
 #dml_adaptive_object_relationship_list= ''
                                    # comma separated list of object pairs
@@ -493,7 +494,7 @@ backend_clustering_mode = 'streaming_replication'
                                    # example: 'tb_t1:tb_t2,insert_tb_f_func():tb_f,tb_v:my_view'
                                    # Note: function name in this list must also be present in
                                    # the write_function_list
-                                   # only valid for disable_load_balance_on_write = 'dml_adaptive'.
+                                   # only valid for disable_load_balance_on_write = dml_adaptive.
 
 #statement_level_load_balance = off
                                    # Enables statement level load balancing
@@ -666,6 +667,9 @@ backend_clustering_mode = 'streaming_replication'
                                    # Leaving it empty will make Pgpool-II to first look for the
                                    # Password in pool_passwd file before using the empty password
 
+#recovery_database = 'postgres'
+                                   # Database name for online recovery
+
 #recovery_1st_stage_command = ''
                                    # Executes a command in first stage
 #recovery_2nd_stage_command = ''
@@ -828,17 +832,17 @@ backend_clustering_mode = 'streaming_replication'
 
 #wd_lost_node_removal_timeout = 0s
                                     # Timeout after which the cluster membership of LOST watchdog
-                                    # nodes gets revoked. After that the node node does not
-                                    # count towards the quorum and consensus computations
-                                    # setting timeout to 0 will never revoke the membership
+                                    # nodes gets revoked. After that the node does not
+                                    # count towards the quorum and consensus computations.
+                                    # Setting timeout to 0 will never revoke the membership
                                     # of LOST nodes
 
 #wd_no_show_node_removal_timeout = 0s
                                     # Time to wait for Watchdog node to connect to the cluster.
                                     # After that time the cluster membership of NO-SHOW node gets
                                     # revoked and it does not count towards the quorum and
-                                    # consensus computations
-                                    # setting timeout to 0 will not revoke the membership
+                                    # consensus computations.
+                                    # Setting timeout to 0 will not revoke the membership
                                     # of NO-SHOW nodes
 
 
@@ -854,8 +858,8 @@ backend_clustering_mode = 'streaming_replication'
                                     # '' to disable monitoring
                                     # (change requires restart)
 
-#wd_lifecheck_method = 'heartbeat'
-                                    # Method of watchdog lifecheck ('heartbeat' or 'query' or 'external')
+#wd_lifecheck_method = heartbeat
+                                    # Method of watchdog lifecheck (heartbeat or query or external)
                                     # (change requires restart)
 #wd_interval = 10
                                     # lifecheck interval (sec) > 0
@@ -963,27 +967,27 @@ backend_clustering_mode = 'streaming_replication'
 #memory_cache_enabled = off
                                    # If on, use the memory cache functionality, off by default
                                    # (change requires restart)
-#memqcache_method = 'shmem'
-                                   # Cache storage method. either 'shmem'(shared memory) or
-                                   # 'memcached'. 'shmem' by default
+#memqcache_method = shmem
+                                   # Cache storage method. either shmem(shared memory) or
+                                   # memcached. shmem by default
                                    # (change requires restart)
 #memqcache_memcached_host = 'localhost'
                                    # Memcached host name or IP address. Mandatory if
-                                   # memqcache_method = 'memcached'.
+                                   # memqcache_method = memcached.
                                    # Defaults to localhost.
                                    # (change requires restart)
 #memqcache_memcached_port = 11211
-                                   # Memcached port number. Mandatory if memqcache_method = 'memcached'.
+                                   # Memcached port number. Mandatory if memqcache_method = memcached.
                                    # Defaults to 11211.
                                    # (change requires restart)
 #memqcache_total_size = 64MB
                                    # Total memory size in bytes for storing memory cache.
-                                   # Mandatory if memqcache_method = 'shmem'.
+                                   # Mandatory if memqcache_method = shmem.
                                    # Defaults to 64MB.
                                    # (change requires restart)
 #memqcache_max_num_cache = 1000000
                                    # Total number of cache entries. Mandatory
-                                   # if memqcache_method = 'shmem'.
+                                   # if memqcache_method = shmem.
                                    # Each cache entry consumes 48 bytes on shared memory.
                                    # Defaults to 1,000,000(45.8MB).
                                    # (change requires restart)
@@ -1001,7 +1005,7 @@ backend_clustering_mode = 'streaming_replication'
                                    # Must be smaller than memqcache_cache_block_size. Defaults to 400KB.
                                    # (change requires restart)
 #memqcache_cache_block_size = 1MB
-                                   # Cache block size in bytes. Mandatory if memqcache_method = 'shmem'.
+                                   # Cache block size in bytes. Mandatory if memqcache_method = shmem.
                                    # Defaults to 1MB.
                                    # (change requires restart)
 #memqcache_oiddir = '/var/log/pgpool/oiddir'

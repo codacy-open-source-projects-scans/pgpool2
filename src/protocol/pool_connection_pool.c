@@ -5,7 +5,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2024	PgPool Global Development Group
+ * Copyright (c) 2003-2025	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -63,8 +63,8 @@ volatile sig_atomic_t backend_timer_expired = 0;	/* flag for connection
 													 * closed timer is expired */
 volatile sig_atomic_t health_check_timer_expired;	/* non 0 if health check
 													 * timer expired */
-static POOL_CONNECTION_POOL_SLOT * create_cp(POOL_CONNECTION_POOL_SLOT * cp, int slot);
-static POOL_CONNECTION_POOL * new_connection(POOL_CONNECTION_POOL * p);
+static POOL_CONNECTION_POOL_SLOT *create_cp(POOL_CONNECTION_POOL_SLOT *cp, int slot);
+static POOL_CONNECTION_POOL *new_connection(POOL_CONNECTION_POOL *p);
 static int	check_socket_status(int fd);
 static bool connect_with_timeout(int fd, struct addrinfo *walk, char *host, int port, bool retry);
 
@@ -161,6 +161,7 @@ pool_get_cp(char *user, char *database, int protoMajor, int check_socket)
 					ereport(LOG,
 							(errmsg("connection closed."),
 							 errdetail("retry to create new connection pool")));
+
 					/*
 					 * It is possible that one of backend just broke.  sleep 1
 					 * second to wait for failover occurres, then wait for the
@@ -235,6 +236,8 @@ pool_discard_cp(char *user, char *database, int protoMajor)
 		}
 		CONNECTION_SLOT(p, i)->sp = NULL;
 		pool_close(CONNECTION(p, i));
+		if (CONNECTION_SLOT(p, i)->negotiateProtocolMsg)
+			pfree(CONNECTION_SLOT(p, i)->negotiateProtocolMsg);
 		pfree(CONNECTION_SLOT(p, i));
 	}
 
@@ -257,7 +260,7 @@ pool_create_cp(void)
 	POOL_CONNECTION_POOL *oldestp;
 	POOL_CONNECTION_POOL *ret;
 	ConnectionInfo *info;
-	int		main_node_id;
+	int			main_node_id;
 
 	POOL_CONNECTION_POOL *p = pool_connection_pool;
 
@@ -295,14 +298,14 @@ pool_create_cp(void)
 	{
 		main_node_id = in_use_backend_id(p);
 		if (main_node_id < 0)
-			elog(ERROR, "no in use backend found");	/* this should not happen */
+			elog(ERROR, "no in use backend found"); /* this should not happen */
 
 		ereport(DEBUG1,
 				(errmsg("creating connection pool"),
-				 errdetail("user: %s database: %s closetime: %ld",
+				 errdetail("user: %s database: %s closetime: %lld",
 						   CONNECTION_SLOT(p, main_node_id)->sp->user,
 						   CONNECTION_SLOT(p, main_node_id)->sp->database,
-						   CONNECTION_SLOT(p, main_node_id)->closetime)));
+						   (long long)CONNECTION_SLOT(p, main_node_id)->closetime)));
 
 		if (CONNECTION_SLOT(p, main_node_id)->closetime < closetime)
 		{
@@ -316,7 +319,7 @@ pool_create_cp(void)
 	p = oldestp;
 	main_node_id = in_use_backend_id(p);
 	if (main_node_id < 0)
-		elog(ERROR, "no in use backend found");	/* this should not happen */
+		elog(ERROR, "no in use backend found"); /* this should not happen */
 	pool_send_frontend_exits(p);
 
 	ereport(DEBUG1,
@@ -356,14 +359,14 @@ pool_create_cp(void)
  * set backend connection close timer
  */
 void
-pool_connection_pool_timer(POOL_CONNECTION_POOL * backend)
+pool_connection_pool_timer(POOL_CONNECTION_POOL *backend)
 {
 	POOL_CONNECTION_POOL *p = pool_connection_pool;
 	int			i;
 
 	ereport(DEBUG1,
 			(errmsg("setting backend connection close timer"),
-			 errdetail("close time %ld", time(NULL))));
+			 errdetail("close time %lld", (long long)time(NULL))));
 
 	/* Set connection close time */
 	for (i = 0; i < NUM_BACKENDS; i++)
@@ -421,7 +424,7 @@ pool_backend_timer(void)
 	now = time(NULL);
 
 	ereport(DEBUG1,
-			(errmsg("backend timer handler called at %ld", now)));
+			(errmsg("backend timer handler called at %lld", (long long)now)));
 
 	for (i = 0; i < pool_config->max_pool; i++, p++)
 	{
@@ -439,8 +442,8 @@ pool_backend_timer(void)
 
 			ereport(DEBUG1,
 					(errmsg("backend timer handler called"),
-					 errdetail("expire time: %ld",
-							   MAIN_CONNECTION(p)->closetime + pool_config->connection_life_time)));
+					 errdetail("expire time: %lld",
+							   (long long)(MAIN_CONNECTION(p)->closetime + pool_config->connection_life_time))));
 
 			if (now >= (MAIN_CONNECTION(p)->closetime + pool_config->connection_life_time))
 			{
@@ -780,6 +783,7 @@ connect_inet_domain_socket_by_port(char *host, int port, bool retry)
 	struct addrinfo *res;
 	struct addrinfo *walk;
 	struct addrinfo hints;
+	int			retry_cnt = 5;	/* getaddrinfo() retry count in case EAI_AGAIN */
 
 	/*
 	 * getaddrinfo() requires a string because it also accepts service names,
@@ -798,13 +802,34 @@ connect_inet_domain_socket_by_port(char *host, int port, bool retry)
 	hints.ai_family = PF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 
-	if ((ret = getaddrinfo(host, portstr, &hints, &res)) != 0)
+	for (;;)
 	{
-		ereport(WARNING,
-				(errmsg("failed to connect to PostgreSQL server, getaddrinfo() failed with error \"%s\"", gai_strerror(ret))));
+		if ((ret = getaddrinfo(host, portstr, &hints, &res)) != 0)
+		{
+			if (!retry || ret != EAI_AGAIN)
+			{
+				ereport(WARNING,
+						(errmsg("failed to connect to PostgreSQL server, getaddrinfo() failed with error \"%s\"",
+								gai_strerror(ret))));
+				free(portstr);
+				return -1;
+			}
 
-		free(portstr);
-		return -1;
+			retry_cnt--;
+
+			if (retry_cnt <= 0)
+			{
+				ereport(WARNING,
+						(errmsg("failed to connect to PostgreSQL server, getaddrinfo() failed due to retry count over")));
+				free(portstr);
+				return -1;
+			}
+			ereport(LOG,
+					(errmsg("failed to connect to PostgreSQL server, getaddrinfo() failed. retrying...")));
+			sleep(1);
+		}
+		else
+			break;
 	}
 
 	free(portstr);
@@ -851,7 +876,8 @@ connect_inet_domain_socket_by_port(char *host, int port, bool retry)
 /*
  * create connection pool
  */
-static POOL_CONNECTION_POOL_SLOT * create_cp(POOL_CONNECTION_POOL_SLOT * cp, int slot)
+static POOL_CONNECTION_POOL_SLOT *
+create_cp(POOL_CONNECTION_POOL_SLOT *cp, int slot)
 {
 	BackendInfo *b = &pool_config->backend_desc->backend_info[slot];
 	int			fd;
@@ -878,13 +904,14 @@ static POOL_CONNECTION_POOL_SLOT * create_cp(POOL_CONNECTION_POOL_SLOT * cp, int
  * Create actual connections to backends.
  * New connection resides in TopMemoryContext.
  */
-static POOL_CONNECTION_POOL * new_connection(POOL_CONNECTION_POOL * p)
+static POOL_CONNECTION_POOL *
+new_connection(POOL_CONNECTION_POOL *p)
 {
 	POOL_CONNECTION_POOL_SLOT *s;
 	int			active_backend_count = 0;
 	int			i;
 	bool		status_changed = false;
-	volatile BACKEND_STATUS	status;
+	volatile BACKEND_STATUS status;
 
 	MemoryContext oldContext = MemoryContextSwitchTo(TopMemoryContext);
 
@@ -923,7 +950,7 @@ static POOL_CONNECTION_POOL * new_connection(POOL_CONNECTION_POOL * p)
 			continue;
 		}
 
-		s = palloc(sizeof(POOL_CONNECTION_POOL_SLOT));
+		s = palloc0(sizeof(POOL_CONNECTION_POOL_SLOT));
 
 		if (create_cp(s, i) == NULL)
 		{
@@ -1073,7 +1100,7 @@ close_all_backend_connections(void)
 
 	for (i = 0; i < pool_config->max_pool; i++, p++)
 	{
-		int	backend_id = in_use_backend_id(p);
+		int			backend_id = in_use_backend_id(p);
 
 		if (backend_id < 0)
 			continue;
@@ -1096,9 +1123,10 @@ close_all_backend_connections(void)
 void
 update_pooled_connection_count(void)
 {
-	int i;
-	int count = 0;
+	int			i;
+	int			count = 0;
 	POOL_CONNECTION_POOL *p = pool_connection_pool;
+
 	for (i = 0; i < pool_config->max_pool; i++, p++)
 	{
 		if (MAIN_CONNECTION(p))
@@ -1114,7 +1142,7 @@ update_pooled_connection_count(void)
 int
 in_use_backend_id(POOL_CONNECTION_POOL *pool)
 {
-	int	i;
+	int			i;
 
 	for (i = 0; i < NUM_BACKENDS; i++)
 	{

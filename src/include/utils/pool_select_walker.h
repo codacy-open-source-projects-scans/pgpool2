@@ -6,7 +6,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2024	PgPool Global Development Group
+ * Copyright (c) 2003-2025	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -51,8 +51,11 @@ typedef struct
 	bool		row_security;	/* true if row security enabled */
 	int			num_oids;		/* number of oids */
 	int			table_oids[POOL_MAX_SELECT_OIDS];	/* table oids */
-	char		table_names[POOL_MAX_SELECT_OIDS][NAMEDATALEN];	/* table names */
-}			SelectContext;
+	char		table_names[POOL_MAX_SELECT_OIDS][NAMEDATALEN]; /* table names */
+} SelectContext;
+
+
+typedef bool (*tree_walker_callback) (Node *node, void *context);
 
 extern int	pool_get_terminate_backend_pid(Node *node);
 extern bool pool_has_function_call(Node *node);
@@ -66,9 +69,9 @@ extern bool pool_has_row_security(Node *node);
 extern bool pool_has_insertinto_or_locking_clause(Node *node);
 extern bool pool_has_pgpool_regclass(void);
 extern bool pool_has_to_regclass(void);
-extern bool raw_expression_tree_walker(Node *node, bool (*walker) (), void *context);
+extern bool raw_expression_tree_walker(Node *node, tree_walker_callback walker, void *context);
 extern int	pool_table_name_to_oid(char *table_name);
-extern int	pool_extract_table_oids_from_select_stmt(Node *node, SelectContext * ctx);
+extern int	pool_extract_table_oids_from_select_stmt(Node *node, SelectContext *ctx);
 extern RangeVar *makeRangeVarFromNameList(List *names);
 extern char *make_table_name_from_rangevar(RangeVar *rangevar);
 extern char *make_function_name_from_funccall(FuncCall *fcall);

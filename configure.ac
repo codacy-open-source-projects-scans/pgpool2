@@ -1,5 +1,5 @@
 dnl Process this file with autoconf to produce a configure script.
-AC_INIT([pgpool-II], [4.6devel], [pgpool-hackers@pgpool.net], [pgpool-II])
+AC_INIT([pgpool-II], [4.7devel], [pgpool-hackers@lists.postgresql.org], [pgpool-II])
 
 dnl Checks for programs.
 AC_PROG_CC
@@ -105,7 +105,7 @@ dnl Checks for typedefs, structures, and compiler characteristics.
 AC_C_CONST
 AC_TYPE_PID_T
 AC_HEADER_TIME
-
+AC_C_BIGENDIAN
 
 dnl ===== Copied from PostgreSQL's configure start =====
 dnl

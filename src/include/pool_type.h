@@ -6,7 +6,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2015	PgPool Global Development Group
+ * Copyright (c) 2003-2025	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -31,32 +31,34 @@
 #include <sys/socket.h>
 #include <stddef.h>
 #include "libpq-fe.h"
-/* Define common boolean type. C++ and BEOS already has it so exclude them. */
-#ifdef c_plusplus
-#ifndef __cplusplus
-#define __cplusplus
-#endif							/* __cplusplus */
-#endif							/* c_plusplus */
 
-#ifndef __BEOS__
-#ifndef __cplusplus
-#ifndef bool
-typedef char bool;
-#endif
-#ifndef true
-#define true ((bool) 1)
-#endif
+/* ----------------------------------------------------------------
+ *				Section 2:	bool, true, false
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * bool
+ *		Boolean value, either true or false.
+ *
+ * PostgreSQL currently cannot deal with bool of size other than 1; there are
+ * static assertions around the code to prevent that.
+ */
+
+#include <stdbool.h>
+
+/*
+ * Pgpool-II still uses TRUE/FALSE, that are only used Windows build in
+ * PostgreSQL.  In the feature, we should replace TRUE/FALSE with true/false,
+ * but until that day...
+ */
+
 #ifndef TRUE
 #define TRUE ((bool) 1)
-#endif
-#ifndef false
-#define false ((bool) 0)
 #endif
 #ifndef FALSE
 #define FALSE ((bool) 0)
 #endif
-#endif							/* not C++ */
-#endif							/* __BEOS__ */
 
 /* ----------------------------------------------------------------
  *              Section 5:  offsetof, lengthof, endof, alignment
@@ -108,12 +110,12 @@ typedef enum
 {
 	LOAD_UNSELECTED = 0,
 	LOAD_SELECTED
-}			LOAD_BALANCE_STATUS;
+} LOAD_BALANCE_STATUS;
 
 extern int	assert_enabled;
 extern void ExceptionalCondition(const char *conditionName,
-					 const char *errorType,
-					 const char *fileName, int lineNumber) __attribute__((noreturn));
+								 const char *errorType,
+								 const char *fileName, int lineNumber) __attribute__((noreturn));
 
 #define MAXIMUM_ALIGNOF 8
 
@@ -221,6 +223,12 @@ typedef unsigned int AuthRequest;
 typedef uint8 bits8;			/* >= 8 bits */
 typedef uint16 bits16;			/* >= 16 bits */
 typedef uint32 bits32;			/* >= 32 bits */
+
+/*
+ * 64-bit integers
+ */
+#define INT64CONST(x)  INT64_C(x)
+#define UINT64CONST(x) UINT64_C(x)
 
 /*
  * stdint.h limits aren't guaranteed to be present and aren't guaranteed to
@@ -499,5 +507,20 @@ typedef void (*pg_on_exit_callback) (int code, Datum arg);
 			*_start++ = 0; \
 	} while (0)
 
+
+/*
+ * Hints to the compiler about the likelihood of a branch. Both likely() and
+ * unlikely() return the boolean value of the contained expression.
+ *
+ * These should only be used sparingly, in very hot code paths. It's very easy
+ * to mis-estimate likelihoods.
+ */
+#if __GNUC__ >= 3
+#define likely(x)	__builtin_expect((x) != 0, 1)
+#define unlikely(x) __builtin_expect((x) != 0, 0)
+#else
+#define likely(x)	((x) != 0)
+#define unlikely(x) ((x) != 0)
+#endif
 
 #endif							/* POOL_TYPE_H */

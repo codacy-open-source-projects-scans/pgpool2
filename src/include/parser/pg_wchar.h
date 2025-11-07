@@ -3,8 +3,8 @@
  * pg_wchar.h
  *	  multibyte-character support
  *
- * Portions Copyright (c) 2003-2024, PgPool Global Development Group
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2003-2025, PgPool Global Development Group
+ * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/mb/pg_wchar.h
@@ -486,7 +486,7 @@ typedef struct
 	uint8		b4_4_lower;		/* min/max allowed value for 4th input byte */
 	uint8		b4_4_upper;
 
-} pg_mb_radix_tree;
+}			pg_mb_radix_tree;
 
 /*
  * UTF-8 to local code conversion map (for combined characters)
@@ -496,7 +496,7 @@ typedef struct
 	uint32		utf1;			/* UTF-8 code 1 */
 	uint32		utf2;			/* UTF-8 code 2 */
 	uint32		code;			/* local code */
-} pg_utf_to_local_combined;
+}			pg_utf_to_local_combined;
 
 /*
  * local code to UTF-8 conversion map (for combined characters)
@@ -506,7 +506,7 @@ typedef struct
 	uint32		code;			/* local code */
 	uint32		utf1;			/* UTF-8 code 1 */
 	uint32		utf2;			/* UTF-8 code 2 */
-} pg_local_to_utf_combined;
+}			pg_local_to_utf_combined;
 
 /*
  * callback function for algorithmic encoding conversions (in either direction)
@@ -663,7 +663,10 @@ extern int	pg_valid_server_encoding_id(int encoding);
  * (in addition to the ones just above).  The constant tables declared
  * earlier in this file are also available from libpgcommon.
  */
+extern void pg_encoding_set_invalid(int encoding, char *dst);
 extern int	pg_encoding_mblen(int encoding, const char *mbstr);
+extern int	pg_encoding_mblen_or_incomplete(int encoding, const char *mbstr,
+											size_t remaining);
 extern int	pg_encoding_mblen_bounded(int encoding, const char *mbstr);
 extern int	pg_encoding_dsplen(int encoding, const char *mbstr);
 extern int	pg_encoding_verifymbchar(int encoding, const char *mbstr, int len);
@@ -745,14 +748,14 @@ extern unsigned short CNStoBIG5(unsigned short cns, unsigned char lc);
 
 extern int	UtfToLocal(const unsigned char *utf, int len,
 					   unsigned char *iso,
-					   const pg_mb_radix_tree *map,
-					   const pg_utf_to_local_combined *cmap, int cmapsize,
+					   const pg_mb_radix_tree * map,
+					   const pg_utf_to_local_combined * cmap, int cmapsize,
 					   utf_local_conversion_func conv_func,
 					   int encoding, bool noError);
 extern int	LocalToUtf(const unsigned char *iso, int len,
 					   unsigned char *utf,
-					   const pg_mb_radix_tree *map,
-					   const pg_local_to_utf_combined *cmap, int cmapsize,
+					   const pg_mb_radix_tree * map,
+					   const pg_local_to_utf_combined * cmap, int cmapsize,
 					   utf_local_conversion_func conv_func,
 					   int encoding, bool noError);
 
@@ -768,9 +771,9 @@ extern void check_encoding_conversion_args(int src_encoding,
 										   int expected_src_encoding,
 										   int expected_dest_encoding);
 
-extern void report_invalid_encoding(int encoding, const char *mbstr, int len) pg_attribute_noreturn();
-extern void report_untranslatable_char(int src_encoding, int dest_encoding,
-									   const char *mbstr, int len) pg_attribute_noreturn();
+pg_noreturn extern void report_invalid_encoding(int encoding, const char *mbstr, int len);
+pg_noreturn extern void report_untranslatable_char(int src_encoding, int dest_encoding,
+												   const char *mbstr, int len);
 
 extern int	local2local(const unsigned char *l, unsigned char *p, int len,
 						int src_encoding, int dest_encoding,
@@ -787,7 +790,7 @@ extern int	mic2latin_with_table(const unsigned char *mic, unsigned char *p,
 								 const unsigned char *tab, bool noError);
 
 #ifdef WIN32
-extern WCHAR *pgwin32_message_to_UTF16(const char *str, int len, int *utf16len);
+extern WCHAR * pgwin32_message_to_UTF16(const char *str, int len, int *utf16len);
 #endif
 
 #endif							/* PG_WCHAR_H */

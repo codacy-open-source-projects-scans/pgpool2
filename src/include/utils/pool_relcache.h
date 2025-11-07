@@ -6,7 +6,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2010	PgPool Global Development Group
+ * Copyright (c) 2003-2025	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -34,8 +34,6 @@
 
 /* Relation lookup cache structure */
 
-typedef void *(*func_ptr) ();
-
 typedef struct
 {
 	char		dbname[MAX_ITEM_LENGTH];	/* database name */
@@ -44,7 +42,7 @@ typedef struct
 	int			refcnt;			/* reference count */
 	int			session_id;		/* LocalSessionId */
 	time_t		expire;			/* cache expiration absolute time in seconds */
-}			PoolRelCache;
+} PoolRelCache;
 
 #define	MAX_QUERY_LENGTH	1500
 typedef struct
@@ -57,29 +55,29 @@ typedef struct
 	 * POOL_SELECT_RESULT *. This function must return a pointer to be saved
 	 * in cache->data.
 	 */
-	func_ptr	register_func;
+	void	   *(*register_func) (POOL_SELECT_RESULT *data);
 
 	/*
 	 * User defined function to be called at data unregister. Argument
 	 * cache->data.
 	 */
-	func_ptr	unregister_func;
+	void	   *(*unregister_func) (void *data);
 	bool		cache_is_session_local; /* True if cache life time is session
 										 * local */
 	bool		no_cache_if_zero;	/* if register func returns 0, do not
 									 * cache the data */
 	PoolRelCache *cache;		/* cache data */
-}			POOL_RELCACHE;
+} POOL_RELCACHE;
 
-extern POOL_RELCACHE * pool_create_relcache(int cachesize, char *sql,
-											func_ptr register_func, func_ptr unregister_func,
-											bool issessionlocal);
-extern void pool_discard_relcache(POOL_RELCACHE * relcache);
-extern void *pool_search_relcache(POOL_RELCACHE * relcache, POOL_CONNECTION_POOL * backend, char *table);
+extern POOL_RELCACHE *pool_create_relcache(int cachesize, char *sql,
+										   void *(*register_func) (POOL_SELECT_RESULT *), void *(*unregister_func) (void *),
+										   bool issessionlocal);
+extern void pool_discard_relcache(POOL_RELCACHE *relcache);
+extern void *pool_search_relcache(POOL_RELCACHE *relcache, POOL_CONNECTION_POOL *backend, char *table);
 extern char *remove_quotes_and_schema_from_relname(char *table);
-extern void *int_register_func(POOL_SELECT_RESULT * res);
+extern void *int_register_func(POOL_SELECT_RESULT *res);
 extern void *int_unregister_func(void *data);
-extern void *string_register_func(POOL_SELECT_RESULT * res);
+extern void *string_register_func(POOL_SELECT_RESULT *res);
 extern void *string_unregister_func(void *data);
 extern bool SplitIdentifierString(char *rawstring, char separator, Node **namelist);
 

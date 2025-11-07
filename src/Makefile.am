@@ -65,7 +65,9 @@ pgpool_SOURCES = main/main.c \
 	utils/statistics.c \
 	utils/pool_health_check_stats.c \
 	utils/psqlscan.l \
-	utils/pgstrcasecmp.c
+	utils/pgstrcasecmp.c \
+	utils/pg_strong_random.c \
+	utils/pg_prng.c
 
 utils/psqlscan.c: utils/psqlscan.l
 	$(LEX) -o'utils/psqlscan.c' $<
@@ -155,6 +157,8 @@ EXTRA_DIST = sample/pgpool.pam \
 		sql/pgpool_adm/pgpool_adm--1.3--1.4.sql \
 		sql/pgpool_adm/pgpool_adm--1.5.sql \
 		sql/pgpool_adm/pgpool_adm--1.4--1.5.sql \
+		sql/pgpool_adm/pgpool_adm--1.6.sql \
+		sql/pgpool_adm/pgpool_adm--1.5--1.6.sql \
 		sql/pgpool_adm/Makefile \
 		test/parser/expected/copy.out test/parser/expected/create.out \
 		test/parser/expected/cursor.out test/parser/expected/delete.out \

@@ -6,7 +6,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2022	PgPool Global Development Group
+ * Copyright (c) 2003-2025	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -64,22 +64,22 @@ typedef struct
 {
 	LifeCheckNode *lifeCheckNode;
 	int			retry;			/* retry times (not used?) */
-	char		*password;
-}			WdPgpoolThreadArg;
+	char	   *password;
+} WdPgpoolThreadArg;
 
 typedef struct WdUpstreamConnectionData
 {
 	char	   *hostname;		/* host name of server */
 	pid_t		pid;			/* pid of ping process */
 	bool		reachable;		/* true if last ping was successful */
-}			WdUpstreamConnectionData;
+} WdUpstreamConnectionData;
 
 
 List	   *g_trusted_server_list = NIL;
 
 static void wd_initialize_trusted_servers_list(void);
 static bool wd_ping_all_server(void);
-static WdUpstreamConnectionData * wd_get_server_from_pid(pid_t pid);
+static WdUpstreamConnectionData *wd_get_server_from_pid(pid_t pid);
 
 static void *thread_ping_pgpool(void *arg);
 static PGconn *create_conn(char *hostname, int port, char *password);
@@ -91,7 +91,7 @@ static void check_pgpool_status_by_hb(void);
 static int	ping_pgpool(PGconn *conn);
 static int	is_parent_alive(void);
 static bool fetch_watchdog_nodes_data(void);
-static int	wd_check_heartbeat(LifeCheckNode * node);
+static int	wd_check_heartbeat(LifeCheckNode *node);
 
 static void load_watchdog_nodes_from_json(char *json_data, int len);
 static void spawn_lifecheck_children(void);
@@ -105,7 +105,7 @@ static const char *lifecheck_child_name(pid_t pid);
 static void reaper(void);
 static int	is_wd_lifecheck_ready(void);
 static int	wd_lifecheck(void);
-static int	wd_ping_pgpool(LifeCheckNode * node, char *password);
+static int	wd_ping_pgpool(LifeCheckNode *node, char *password);
 static pid_t fork_lifecheck_child(void);
 
 
@@ -133,11 +133,14 @@ lifecheck_child_name(pid_t pid)
 {
 	int			i;
 
-	for (i = 0; i < pool_config->num_hb_dest_if; i++)
+	for (i = 0; i < pool_config->num_hb_local_if; i++)
 	{
 		if (g_hb_receiver_pid && pid == g_hb_receiver_pid[i])
 			return "heartBeat receiver";
-		else if (g_hb_sender_pid && pid == g_hb_sender_pid[i])
+	}
+	for (i = 0; i < pool_config->num_hb_dest_if; i++)
+	{
+		if (g_hb_sender_pid && pid == g_hb_sender_pid[i])
 			return "heartBeat sender";
 	}
 	/* Check if it was a ping to trusted server process */
@@ -211,13 +214,13 @@ wd_reaper_lifecheck(pid_t pid, int status)
 	if (g_hb_receiver_pid == NULL && g_hb_sender_pid == NULL)
 		return -1;
 
-	for (i = 0; i < pool_config->num_hb_dest_if; i++)
+	for (i = 0; i < pool_config->num_hb_local_if; i++)
 	{
 		if (g_hb_receiver_pid && pid == g_hb_receiver_pid[i])
 		{
 			if (restart_child)
 			{
-				g_hb_receiver_pid[i] = wd_hb_receiver(1, &(pool_config->hb_dest_if[i]));
+				g_hb_receiver_pid[i] = wd_hb_receiver(1, &(pool_config->hb_local_if[i]));
 				ereport(LOG,
 						(errmsg("fork a new %s process with pid: %d", proc_name, g_hb_receiver_pid[i])));
 			}
@@ -226,8 +229,11 @@ wd_reaper_lifecheck(pid_t pid, int status)
 
 			return g_hb_receiver_pid[i];
 		}
+	}
 
-		else if (g_hb_sender_pid && pid == g_hb_sender_pid[i])
+	for (i = 0; i < pool_config->num_hb_dest_if; i++)
+	{
+		if (g_hb_sender_pid && pid == g_hb_sender_pid[i])
 		{
 			if (restart_child)
 			{
@@ -253,17 +259,21 @@ lifecheck_kill_all_children(int sig)
 		&& g_hb_receiver_pid && g_hb_sender_pid)
 	{
 		int			i;
+		pid_t		pid_child;
 
-		for (i = 0; i < pool_config->num_hb_dest_if; i++)
+		for (i = 0; i < pool_config->num_hb_local_if; i++)
 		{
-			pid_t		pid_child = g_hb_receiver_pid[i];
+			pid_child = g_hb_receiver_pid[i];
 
 			if (pid_child > 0)
 			{
 				kill(pid_child, sig);
 				ret = true;
 			}
+		}
 
+		for (i = 0; i < pool_config->num_hb_dest_if; i++)
+		{
 			pid_child = g_hb_sender_pid[i];
 
 			if (pid_child > 0)
@@ -378,6 +388,7 @@ lifecheck_main(void)
 {
 	sigjmp_buf	local_sigjmp_buf;
 	int			i;
+	bool		need_life_check_warning = false;
 
 	ereport(DEBUG1,
 			(errmsg("I am watchdog lifecheck child with pid:%d", getpid())));
@@ -424,6 +435,14 @@ lifecheck_main(void)
 	/* wait until ready to go */
 	while (WD_OK != is_wd_lifecheck_ready())
 	{
+		/*
+		 * For the first time we do not emit warning since it is likely the
+		 * life check is not ready.
+		 */
+		if (need_life_check_warning)
+			ereport(WARNING,
+					(errmsg("watchdog: lifecheck has not started yet")));
+		need_life_check_warning = true;
 		sleep(pool_config->wd_interval * 10);
 	}
 
@@ -468,14 +487,17 @@ spawn_lifecheck_children(void)
 	{
 		int			i;
 
-		g_hb_receiver_pid = palloc0(sizeof(pid_t) * pool_config->num_hb_dest_if);
+		g_hb_receiver_pid = palloc0(sizeof(pid_t) * pool_config->num_hb_local_if);
 		g_hb_sender_pid = palloc0(sizeof(pid_t) * pool_config->num_hb_dest_if);
+
+		for (i = 0; i < pool_config->num_hb_local_if; i++)
+		{
+			/* heartbeat receiver process */
+			g_hb_receiver_pid[i] = wd_hb_receiver(1, &(pool_config->hb_local_if[i]));
+		}
 
 		for (i = 0; i < pool_config->num_hb_dest_if; i++)
 		{
-			/* heartbeat receiver process */
-			g_hb_receiver_pid[i] = wd_hb_receiver(1, &(pool_config->hb_dest_if[i]));
-
 			/* heartbeat sender process */
 			g_hb_sender_pid[i] = wd_hb_sender(1, &(pool_config->hb_dest_if[i]));
 		}
@@ -503,7 +525,7 @@ print_lifecheck_cluster(void)
 }
 
 static bool
-inform_node_status(LifeCheckNode * node, char *message)
+inform_node_status(LifeCheckNode *node, char *message)
 {
 	int			node_status,
 				x;
@@ -567,7 +589,7 @@ fetch_watchdog_nodes_data(void)
 static void
 load_watchdog_nodes_from_json(char *json_data, int len)
 {
-	size_t shmem_size;
+	size_t		shmem_size;
 	json_value *root;
 	json_value *value;
 	int			i,
@@ -621,14 +643,15 @@ load_watchdog_nodes_from_json(char *json_data, int len)
 
 	gslifeCheckCluster = pool_shared_memory_create(shmem_size);
 	gslifeCheckCluster->nodeCount = nodeCount;
-	gslifeCheckCluster->lifeCheckNodes = (LifeCheckNode*)((char*)gslifeCheckCluster + MAXALIGN(sizeof(LifeCheckCluster)));
+	gslifeCheckCluster->lifeCheckNodes = (LifeCheckNode *) ((char *) gslifeCheckCluster + MAXALIGN(sizeof(LifeCheckCluster)));
 	for (i = 0; i < nodeCount; i++)
 	{
 		WDNodeInfo *nodeInfo = parse_watchdog_node_info_from_wd_node_json(value->u.array.values[i]);
-		
+
 		gslifeCheckCluster->lifeCheckNodes[i].wdState = nodeInfo->state;
 		strcpy(gslifeCheckCluster->lifeCheckNodes[i].stateName, nodeInfo->stateName);
-		gslifeCheckCluster->lifeCheckNodes[i].nodeState = NODE_EMPTY; /* This is local health check state*/
+		gslifeCheckCluster->lifeCheckNodes[i].nodeState = NODE_EMPTY;	/* This is local health
+																		 * check state */
 		gslifeCheckCluster->lifeCheckNodes[i].ID = nodeInfo->id;
 		strcpy(gslifeCheckCluster->lifeCheckNodes[i].hostName, nodeInfo->hostName);
 		strcpy(gslifeCheckCluster->lifeCheckNodes[i].nodeName, nodeInfo->nodeName);
@@ -641,7 +664,14 @@ load_watchdog_nodes_from_json(char *json_data, int len)
 	json_value_free(root);
 }
 
-
+/*----------
+ * is_wd_lifecheck_ready
+ *
+ * Check all registered watchdog nodes and returns WD_OK if:
+ * query mode: wd_ping_pgpool returns WD_OK
+ * hearbeat mode: has received from and
+ *				  sent to all node the heartbeat message
+ */
 static int
 is_wd_lifecheck_ready(void)
 {
@@ -679,7 +709,7 @@ is_wd_lifecheck_ready(void)
 			{
 				ereport(DEBUG1,
 						(errmsg("watchdog checking life check is ready"),
-						 errdetail("pgpool:%d at \"%s:%d\" has not send the heartbeat signal yet",
+						 errdetail("pgpool:%d at \"%s:%d\" has not received from or sent to the heartbeat signal yet",
 								   i, node->hostName, node->pgpoolPort)));
 				rtn = WD_NG;
 			}
@@ -836,7 +866,7 @@ check_pgpool_status_by_query(void)
 			ereport(WARNING,
 					(errmsg("failed to create thread for checking pgpool status by query for  %d (%s:%d)",
 							i, node->hostName, node->pgpoolPort),
-					 errdetail("pthread_create failed with error code %d: %s",rc, strerror(rc))));
+					 errdetail("pthread_create failed with error code %d: %s", rc, strerror(rc))));
 		}
 	}
 
@@ -913,7 +943,8 @@ thread_ping_pgpool(void *arg)
 {
 	uintptr_t	rtn;
 	WdPgpoolThreadArg *thread_arg = (WdPgpoolThreadArg *) arg;
-	rtn = (uintptr_t) wd_ping_pgpool(thread_arg->lifeCheckNode,thread_arg->password);
+
+	rtn = (uintptr_t) wd_ping_pgpool(thread_arg->lifeCheckNode, thread_arg->password);
 
 	pthread_exit((void *) rtn);
 }
@@ -943,13 +974,15 @@ create_conn(char *hostname, int port, char *password)
 	}
 
 	snprintf(conninfo, sizeof(conninfo),
-			 "host='%s' port='%d' dbname='%s' user='%s' password='%s' connect_timeout='%d'",
+			 "host='%s' port='%d' dbname='%s' user='%s' password='%s' connect_timeout='%d' application_name='%s'",
 			 hostname,
 			 port,
 			 pool_config->wd_lifecheck_dbname,
 			 pool_config->wd_lifecheck_user,
 			 password ? password : "",
-			 pool_config->wd_interval / 2 + 1);
+			 pool_config->wd_interval / 2 + 1,
+			 "lifecheck_ping");
+
 	conn = PQconnectdb(conninfo);
 
 	if (PQstatus(conn) != CONNECTION_OK)
@@ -968,7 +1001,7 @@ create_conn(char *hostname, int port, char *password)
  * Check if pgpool is alive using heartbeat signal.
  */
 static int
-wd_check_heartbeat(LifeCheckNode * node)
+wd_check_heartbeat(LifeCheckNode *node)
 {
 	int			interval;
 	struct timeval tv;
@@ -1008,19 +1041,19 @@ wd_check_heartbeat(LifeCheckNode * node)
  * Check if pgpool can accept the lifecheck query.
  */
 static int
-wd_ping_pgpool(LifeCheckNode * node, char* password)
+wd_ping_pgpool(LifeCheckNode *node, char *password)
 {
 	PGconn	   *conn;
 
 	conn = create_conn(node->hostName, node->pgpoolPort, password);
 	if (conn == NULL)
 	{
-		if(chceck_password_type_is_not_md5(pool_config->wd_lifecheck_user, pool_config->wd_lifecheck_password) == -1)
+		if (check_password_type_is_not_md5(pool_config->wd_lifecheck_user, pool_config->wd_lifecheck_password) == -1)
 		{
 			ereport(ERROR,
 					(errmsg("the password of wd_lifecheck_user %s is invalid format",
-						pool_config->recovery_user),
-					errdetail("wd_lifecheck_password is not allowed to be md5 hashed format")));
+							pool_config->wd_lifecheck_user),
+					 errdetail("wd_lifecheck_password is not allowed to be md5 hashed format")));
 		}
 		return WD_NG;
 	}
@@ -1167,7 +1200,8 @@ wd_ping_all_server(void)
 	return false;
 }
 
-static WdUpstreamConnectionData * wd_get_server_from_pid(pid_t pid)
+static WdUpstreamConnectionData *
+wd_get_server_from_pid(pid_t pid)
 {
 	ListCell   *lc;
 

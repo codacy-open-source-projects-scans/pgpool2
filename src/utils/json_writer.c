@@ -26,9 +26,10 @@
 #include "utils/palloc.h"
 #include "utils/json_writer.h"
 
-static inline int jw_get_current_element_count(JsonNode * jNode);
-static inline void jw_inc_current_element_count(JsonNode * jNode);
-static inline JWElementType jw_get_current_element_type(JsonNode * jNode);
+static void jw_put_string_escape(JsonNode *jNode, char *string);
+static inline int jw_get_current_element_count(JsonNode *jNode);
+static inline void jw_inc_current_element_count(JsonNode *jNode);
+static inline JWElementType jw_get_current_element_type(JsonNode *jNode);
 
 
 JsonNode *
@@ -56,7 +57,7 @@ jw_create_with_object(bool pretty_output)
 }
 
 bool
-jw_put_string(JsonNode * jNode, char *key, char *value)
+jw_put_string(JsonNode *jNode, char *key, char *value)
 {
 	if (key == NULL || value == NULL)
 		return false;
@@ -67,20 +68,61 @@ jw_put_string(JsonNode * jNode, char *key, char *value)
 
 	if (jw_get_current_element_count(jNode) > 0)
 		appendStringInfoChar(jNode->buf, ',');
-	appendStringInfo(jNode->buf, "\"%s\":\"%s\"", key, value);
+	jw_put_string_escape(jNode, key);
+	appendStringInfoChar(jNode->buf, ':');
+	jw_put_string_escape(jNode, value);
 	jw_inc_current_element_count(jNode);
 	return true;
 }
 
+static void
+jw_put_string_escape(JsonNode *jNode, char *string)
+{
+	int			i;
+
+	appendStringInfoChar(jNode->buf, '"');
+	for (i = 0; string[i] != '\0'; i++)
+	{
+		switch (string[i])
+		{
+			case '\"':
+				appendStringInfo(jNode->buf, "\\\"");
+				break;
+			case '\\':
+				appendStringInfo(jNode->buf, "\\\\");
+				break;
+			case '\b':
+				appendStringInfo(jNode->buf, "\\b");
+				break;
+			case '\f':
+				appendStringInfo(jNode->buf, "\\f");
+				break;
+			case '\n':
+				appendStringInfo(jNode->buf, "\\n");
+				break;
+			case '\r':
+				appendStringInfo(jNode->buf, "\\r");
+				break;
+			case '\t':
+				appendStringInfo(jNode->buf, "\\t");
+				break;
+			default:
+				appendStringInfoChar(jNode->buf, string[i]);
+				break;
+		}
+	}
+	appendStringInfoChar(jNode->buf, '"');
+}
+
 /* for compatibility reasons we pack bool in int*/
 bool
-jw_put_bool(JsonNode * jNode, char *key, bool value)
+jw_put_bool(JsonNode *jNode, char *key, bool value)
 {
 	return jw_put_int(jNode, key, value ? 1 : 0);
 }
 
 bool
-jw_put_int(JsonNode * jNode, char *key, int value)
+jw_put_int(JsonNode *jNode, char *key, int value)
 {
 	if (key == NULL)
 		return false;
@@ -97,7 +139,7 @@ jw_put_int(JsonNode * jNode, char *key, int value)
 }
 
 bool
-jw_put_long(JsonNode * jNode, char *key, long value)
+jw_put_long(JsonNode *jNode, char *key, long value)
 {
 	if (key == NULL)
 		return false;
@@ -114,7 +156,7 @@ jw_put_long(JsonNode * jNode, char *key, long value)
 }
 
 bool
-jw_put_null(JsonNode * jNode, char *key)
+jw_put_null(JsonNode *jNode, char *key)
 {
 	if (key == NULL)
 		return false;
@@ -131,7 +173,7 @@ jw_put_null(JsonNode * jNode, char *key)
 }
 
 bool
-jw_put_string_value(JsonNode * jNode, char *value)
+jw_put_string_value(JsonNode *jNode, char *value)
 {
 	if (value == NULL)
 		return false;
@@ -148,13 +190,13 @@ jw_put_string_value(JsonNode * jNode, char *value)
 }
 
 bool
-jw_put_bool_value(JsonNode * jNode, bool value)
+jw_put_bool_value(JsonNode *jNode, bool value)
 {
 	return jw_put_int_value(jNode, value ? 1 : 0);
 }
 
 bool
-jw_put_int_value(JsonNode * jNode, int value)
+jw_put_int_value(JsonNode *jNode, int value)
 {
 	if (jw_get_current_element_count(jNode) < 0)
 		return false;
@@ -169,7 +211,7 @@ jw_put_int_value(JsonNode * jNode, int value)
 }
 
 bool
-jw_put_long_value(JsonNode * jNode, long value)
+jw_put_long_value(JsonNode *jNode, long value)
 {
 	if (jw_get_current_element_count(jNode) < 0)
 		return false;
@@ -184,7 +226,7 @@ jw_put_long_value(JsonNode * jNode, long value)
 }
 
 bool
-jw_put_null_value(JsonNode * jNode)
+jw_put_null_value(JsonNode *jNode)
 {
 	if (jw_get_current_element_count(jNode) < 0)
 		return false;
@@ -199,7 +241,7 @@ jw_put_null_value(JsonNode * jNode)
 }
 
 bool
-jw_start_element(JsonNode * jNode, JWElementType element, char *key)
+jw_start_element(JsonNode *jNode, JWElementType element, char *key)
 {
 	char		ch;
 
@@ -233,7 +275,7 @@ jw_start_element(JsonNode * jNode, JWElementType element, char *key)
 }
 
 bool
-jw_start_array(JsonNode * jNode, char *key)
+jw_start_array(JsonNode *jNode, char *key)
 {
 	if (jw_get_current_element_type(jNode) == JWARRAY)
 		return jw_start_element(jNode, JWARRAY, NULL);
@@ -241,7 +283,7 @@ jw_start_array(JsonNode * jNode, char *key)
 }
 
 bool
-jw_start_object(JsonNode * jNode, char *key)
+jw_start_object(JsonNode *jNode, char *key)
 {
 	if (jw_get_current_element_type(jNode) == JWARRAY)
 		return jw_start_element(jNode, JWOBJECT, NULL);
@@ -249,7 +291,7 @@ jw_start_object(JsonNode * jNode, char *key)
 }
 
 bool
-jw_end_element(JsonNode * jNode)
+jw_end_element(JsonNode *jNode)
 {
 	char		ch;
 	JWElementType element;
@@ -269,7 +311,7 @@ jw_end_element(JsonNode * jNode)
 }
 
 bool
-jw_finish_document(JsonNode * jNode)
+jw_finish_document(JsonNode *jNode)
 {
 	while (jNode->stack_ptr > 0)
 	{
@@ -280,19 +322,19 @@ jw_finish_document(JsonNode * jNode)
 }
 
 char *
-jw_get_json_string(JsonNode * jNode)
+jw_get_json_string(JsonNode *jNode)
 {
 	return jNode->buf->data;
 }
 
 int
-jw_get_json_length(JsonNode * jNode)
+jw_get_json_length(JsonNode *jNode)
 {
 	return jNode->buf->len;
 }
 
 void
-jw_destroy(JsonNode * jNode)
+jw_destroy(JsonNode *jNode)
 {
 	pfree(jNode->buf->data);
 	pfree(jNode->buf);
@@ -300,7 +342,7 @@ jw_destroy(JsonNode * jNode)
 }
 
 static inline int
-jw_get_current_element_count(JsonNode * jNode)
+jw_get_current_element_count(JsonNode *jNode)
 {
 	if (jNode->stack_ptr <= 0)
 		return -1;
@@ -308,14 +350,15 @@ jw_get_current_element_count(JsonNode * jNode)
 }
 
 static inline void
-jw_inc_current_element_count(JsonNode * jNode)
+jw_inc_current_element_count(JsonNode *jNode)
 {
 	if (jNode->stack_ptr <= 0)
 		return;
 	jNode->stack[jNode->stack_ptr - 1].elementCount++;
 }
 
-static inline JWElementType jw_get_current_element_type(JsonNode * jNode)
+static inline JWElementType
+jw_get_current_element_type(JsonNode *jNode)
 {
 	if (jNode->stack_ptr <= 0)
 		return -1;

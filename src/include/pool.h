@@ -4,7 +4,9 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2024	PgPool Global Development Group
+ * Portions Copyright (c) 2003-2025	PgPool Global Development Group
+ * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1994, Regents of the University of California
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -93,7 +95,7 @@ typedef enum
 	POOL_ERROR,
 	POOL_FATAL,
 	POOL_DEADLOCK
-}			POOL_STATUS;
+} POOL_STATUS;
 
 typedef enum
 {
@@ -101,7 +103,42 @@ typedef enum
 	POOL_SOCKET_VALID,
 	POOL_SOCKET_ERROR,
 	POOL_SOCKET_EOF
-}			POOL_SOCKET_STATE;
+} POOL_SOCKET_STATE;
+
+/*
+ * Imported from src/include/libpq/pqcomm.h as of PostgreSQL 18.
+ *
+ * These manipulate the frontend/backend protocol version number.
+ *
+ * The major number should be incremented for incompatible changes.  The minor
+ * number should be incremented for compatible changes (eg. additional
+ * functionality).
+ *
+ * If a backend supports version m.n of the protocol it must actually support
+ * versions m.[0..n].  Backend support for version m-1 can be dropped after a
+ * `reasonable' length of time.
+ *
+ * A frontend isn't required to support anything other than the current
+ * version.
+ */
+
+#define PG_PROTOCOL_MAJOR(v)	((v) >> 16)
+#define PG_PROTOCOL_MINOR(v)	((v) & 0x0000ffff)
+#define PG_PROTOCOL_FULL(v)	(PG_PROTOCOL_MAJOR(v) * 10000 + PG_PROTOCOL_MINOR(v))
+#define PG_PROTOCOL(m,n)	(((m) << 16) | (n))
+
+/*
+ * The earliest and latest frontend/backend protocol version supported.
+ */
+
+#define PG_PROTOCOL_EARLIEST	PG_PROTOCOL(3,0)
+#define PG_PROTOCOL_LATEST		PG_PROTOCOL(3,2)
+
+typedef uint32 ProtocolVersion; /* FE/BE protocol version number */
+
+typedef ProtocolVersion MsgType;
+
+/* end of importing */
 
 /* protocol major version numbers */
 #define PROTO_MAJOR_V2	2
@@ -127,7 +164,7 @@ typedef struct StartupPacket_v2
 	char		options[SM_OPTIONS];	/* Optional additional args */
 	char		unused[SM_UNUSED];	/* Unused */
 	char		tty[SM_TTY];	/* Tty for debug output */
-}			StartupPacket_v2;
+} StartupPacket_v2;
 
 /* startup packet info */
 typedef struct
@@ -148,8 +185,8 @@ typedef struct CancelPacket
 {
 	int			protoVersion;	/* Protocol version */
 	int			pid;			/* backend process id */
-	int			key;			/* cancel key */
-}			CancelPacket;
+	char		key[MAX_CANCELKEY_LENGTH];	/* cancel key */
+} CancelPacket;
 
 #define MAX_PASSWORD_SIZE		1024
 
@@ -248,7 +285,7 @@ typedef struct
 	PasswordMapping *passwordMapping;
 	ConnectionInfo *con_info;	/* shared memory coninfo used for handling the
 								 * query containing pg_terminate_backend */
-}			POOL_CONNECTION;
+} POOL_CONNECTION;
 
 /*
  * connection pool structure
@@ -257,12 +294,28 @@ typedef struct
 {
 	StartupPacket *sp;			/* startup packet info */
 	int			pid;			/* backend pid */
-	int			key;			/* cancel key */
+	char		key[MAX_CANCELKEY_LENGTH];	/* cancel key */
+
+	/*
+	 * Cancel key length. In protocol version 3.0, it is 4. In 3.2 or later,
+	 * the maximum length is 256.
+	 */
+	int32		keylen;
 	POOL_CONNECTION *con;
 	time_t		closetime;		/* absolute time in second when the connection
 								 * closed if 0, that means the connection is
 								 * under use. */
-}			POOL_CONNECTION_POOL_SLOT;
+
+	/*
+	 * Protocol version after negotiation. If nplen == 0, no negotiation has
+	 * been done.
+	 */
+	int			negotiated_major;
+	int			negotiated_minor;
+	char	   *negotiateProtocolMsg;	/* Raw NegotiateProtocol messag */
+	int32		nplen;			/* message length of NegotiateProtocol messag */
+
+} POOL_CONNECTION_POOL_SLOT;
 
 typedef struct
 {
@@ -273,7 +326,7 @@ typedef struct
 	 */
 	ConnectionInfo *info;
 	POOL_CONNECTION_POOL_SLOT *slots[MAX_NUM_BACKENDS];
-}			POOL_CONNECTION_POOL;
+} POOL_CONNECTION_POOL;
 
 
 /* Defined in pool_session_context.h */
@@ -292,7 +345,7 @@ extern int	pool_get_major_version(void);
 extern bool pool_is_node_to_be_sent_in_current_query(int node_id);
 extern int	pool_virtual_main_db_node_id(void);
 
-extern BACKEND_STATUS * my_backend_status[];
+extern BACKEND_STATUS *my_backend_status[];
 extern int	my_main_node_id;
 
 #define VALID_BACKEND(backend_id) \
@@ -351,17 +404,15 @@ typedef enum
 	POOL_NODE_STATUS_PRIMARY,	/* primary node */
 	POOL_NODE_STATUS_STANDBY,	/* standby node */
 	POOL_NODE_STATUS_INVALID	/* invalid node (split brain, stand alone) */
-}			POOL_NODE_STATUS;
+} POOL_NODE_STATUS;
 
 /* Clustering mode macros */
 #define REPLICATION (pool_config->backend_clustering_mode == CM_NATIVE_REPLICATION || \
 					 pool_config->backend_clustering_mode == CM_SNAPSHOT_ISOLATION)
 #define MAIN_REPLICA (pool_config->backend_clustering_mode == CM_STREAMING_REPLICATION || \
-					  pool_config->backend_clustering_mode == CM_LOGICAL_REPLICATION || \
-					  pool_config->backend_clustering_mode == CM_SLONY)
+					  pool_config->backend_clustering_mode == CM_LOGICAL_REPLICATION)
 #define STREAM (pool_config->backend_clustering_mode == CM_STREAMING_REPLICATION)
 #define LOGICAL (pool_config->backend_clustering_mode == CM_LOGICAL_REPLICATION)
-#define SLONY (pool_config->backend_clustering_mode == CM_SLONY)
 #define RAW_MODE (pool_config->backend_clustering_mode == CM_RAW)
 #define SL_MODE (STREAM || LOGICAL) /* streaming or logical replication mode */
 
@@ -381,10 +432,11 @@ typedef enum
 #define ACCEPT_FD_SEM			4
 #define SI_CRITICAL_REGION_SEM	5
 #define FOLLOW_PRIMARY_SEM		6
-#define MAIN_EXIT_HANDLER_SEM	7	/* used in exit_hander in pgpool main process */
+#define MAIN_EXIT_HANDLER_SEM	7	/* used in exit_hander in pgpool main
+									 * process */
 #define MAX_REQUEST_QUEUE_SIZE	10
 
-#define MAX_SEC_WAIT_FOR_CLUSTER_TRANSACTION 10	/* time in seconds to keep
+#define MAX_SEC_WAIT_FOR_CLUSTER_TRANSACTION 10 /* time in seconds to keep
 												 * retrying for a watchdog
 												 * command if the cluster is
 												 * not in stable state */
@@ -414,7 +466,7 @@ typedef enum
 	CLOSE_IDLE_REQUEST,
 	PROMOTE_NODE_REQUEST,
 	NODE_QUARANTINE_REQUEST
-}			POOL_REQUEST_KIND;
+} POOL_REQUEST_KIND;
 
 #define REQ_DETAIL_SWITCHOVER	0x00000001	/* failover due to switch over */
 #define REQ_DETAIL_WATCHDOG		0x00000002	/* failover req from watchdog */
@@ -422,8 +474,10 @@ typedef enum
 											 * require majority vote */
 #define REQ_DETAIL_UPDATE		0x00000008	/* failover req is just an update
 											 * node status request */
-#define REQ_DETAIL_PROMOTE		0x00000010	/* failover req is actually promoting the specified standby node.
-											 * current primary will be detached */
+#define REQ_DETAIL_PROMOTE		0x00000010	/* failover req is actually
+											 * promoting the specified standby
+											 * node. current primary will be
+											 * detached */
 
 typedef struct
 {
@@ -431,36 +485,46 @@ typedef struct
 	unsigned char request_details;	/* option flags kind */
 	int			node_id[MAX_NUM_BACKENDS];	/* request node id */
 	int			count;			/* request node ids count */
-}			POOL_REQUEST_NODE;
+} POOL_REQUEST_NODE;
 
 typedef struct
 {
 	POOL_REQUEST_NODE request[MAX_REQUEST_QUEUE_SIZE];
 	int			request_queue_head;
 	int			request_queue_tail;
-	int			main_node_id; /* the youngest node id which is not in down
+	int			main_node_id;	/* the youngest node id which is not in down
 								 * status */
 	int			primary_node_id;	/* the primary node id in streaming
 									 * replication mode */
-	int			conn_counter;	/* number of connections from clients to pgpool */
+	int			conn_counter;	/* number of connections from clients to
+								 * pgpool */
 	bool		switching;		/* it true, failover or failback is in
 								 * progress */
-	/* greater than 0 if follow primary command or detach_false_primary in
-	 * execution */
+
+	/*
+	 * greater than 0 if follow primary command or detach_false_primary in
+	 * execution
+	 */
 	bool		follow_primary_count;
-	bool		follow_primary_lock_pending; /* watchdog process can't wait
-											  * for follow_primary lock acquisition
-											  * in case it is held at the time of
-											  * request.
-											  * This flag indicates that lock was requested
-											  * by watchdog coordinator and next contender should
-											  * wait for the coordinator to release the lock
-											  */
-	bool		follow_primary_lock_held_remotely; /* true when lock is held by
-													watchdog coordinator*/
-	bool		follow_primary_ongoing;	/* true if follow primary command is ongoing */
-	bool		query_cache_invalidate_request;	/* true if pcp_invalidate_query_cache requested */
-}			POOL_REQUEST_INFO;
+	bool		follow_primary_lock_pending;	/* watchdog process can't wait
+												 * for follow_primary lock
+												 * acquisition in case it is
+												 * held at the time of
+												 * request. This flag
+												 * indicates that lock was
+												 * requested by watchdog
+												 * coordinator and next
+												 * contender should wait for
+												 * the coordinator to release
+												 * the lock */
+	bool		follow_primary_lock_held_remotely;	/* true when lock is held
+													 * by watchdog coordinator */
+	bool		follow_primary_ongoing; /* true if follow primary command is
+										 * ongoing */
+	bool		query_cache_invalidate_request; /* true if
+												 * pcp_invalidate_query_cache
+												 * requested */
+} POOL_REQUEST_INFO;
 
 /* description of row. corresponding to RowDescription message */
 typedef struct
@@ -472,13 +536,13 @@ typedef struct
 	int			typeoid;		/* data type oid */
 	int			size;			/* data length minus means variable data type */
 	int			mod;			/* data type modifier */
-}			AttrInfo;
+} AttrInfo;
 
 typedef struct
 {
 	int			num_attrs;		/* number of attributes */
 	AttrInfo   *attrinfo;
-}			RowDesc;
+} RowDesc;
 
 typedef struct
 {
@@ -488,7 +552,7 @@ typedef struct
 								 * excluding termination null */
 	char	  **data;			/* actual row character data terminated with
 								 * null */
-}			POOL_SELECT_RESULT;
+} POOL_SELECT_RESULT;
 
 /*
  * recovery mode
@@ -521,8 +585,9 @@ typedef enum
 	PT_PCP_WORKER,
 	PT_HEALTH_CHECK,
 	PT_LOGGER,
-	PT_LAST_PTYPE	/* last ptype marker. any ptype must be above this. */
-}			ProcessType;
+	PT_LAST_PTYPE				/* last ptype marker. any ptype must be above
+								 * this. */
+} ProcessType;
 
 
 typedef enum
@@ -534,17 +599,17 @@ typedef enum
 	BACKEND_CONNECTING,
 	PROCESSING,
 	EXITING
-}			ProcessState;
+} ProcessState;
 
 /*
  * Snapshot isolation manage area in shared memory
  */
 typedef struct
 {
-	uint32		commit_counter;		/* number of committing children */
+	uint32		commit_counter; /* number of committing children */
 	uint32		snapshot_counter;	/* number of snapshot acquiring children */
-	pid_t		*snapshot_waiting_children;		/* array size is num_init_children */
-	pid_t		*commit_waiting_children;		/* array size is num_init_children */
+	pid_t	   *snapshot_waiting_children;	/* array size is num_init_children */
+	pid_t	   *commit_waiting_children;	/* array size is num_init_children */
 } SI_ManageInfo;
 
 /*
@@ -555,14 +620,14 @@ extern pid_t mypid;				/* parent pid */
 extern pid_t myProcPid;			/* process pid */
 extern ProcessType processType;
 extern ProcessState processState;
-extern bool	reset_query_error;	/* true if error occurs in reset queries */
+extern bool reset_query_error;	/* true if error occurs in reset queries */
 extern void set_application_name(ProcessType ptype);
 extern void set_application_name_with_string(char *string);
 extern void set_application_name_with_suffix(ProcessType ptype, int suffix);
 extern char *get_application_name(void);
 extern char *get_application_name_for_process(ProcessType ptype);
 
-void SetProcessGlobalVariables(ProcessType pType);
+void		SetProcessGlobalVariables(ProcessType pType);
 
 extern volatile SI_ManageInfo *si_manage_info;
 extern volatile sig_atomic_t sigusr2_received;
@@ -572,9 +637,9 @@ extern volatile sig_atomic_t backend_timer_expired; /* flag for connection
 extern volatile sig_atomic_t health_check_timer_expired;	/* non 0 if health check
 															 * timer expired */
 extern int	my_proc_id;			/* process table id (!= UNIX's PID) */
-extern ProcessInfo * process_info;	/* shmem process information table */
-extern ConnectionInfo * con_info;	/* shmem connection info table */
-extern POOL_REQUEST_INFO * Req_info;
+extern ProcessInfo *process_info;	/* shmem process information table */
+extern ConnectionInfo *con_info;	/* shmem connection info table */
+extern POOL_REQUEST_INFO *Req_info;
 extern volatile sig_atomic_t *InRecovery;
 extern volatile sig_atomic_t got_sighup;
 extern volatile sig_atomic_t exit_request;
@@ -609,7 +674,7 @@ extern void pcp_main(int *fds);
 extern void do_child(int *fds);
 extern void child_exit(int code);
 
-extern void cancel_request(CancelPacket * sp);
+extern void cancel_request(CancelPacket *sp, int32 len);
 extern void check_stop_request(void);
 extern void pool_initialize_private_backend_status(void);
 extern int	send_to_pg_frontend(char *data, int len, bool flush);
@@ -622,22 +687,22 @@ extern void set_process_status(ProcessStatus status);
 extern void *pool_shared_memory_create(size_t size);
 extern void pool_shmem_exit(int code);
 extern void initialize_shared_memory_main_segment(size_t size);
-extern void * pool_shared_memory_segment_get_chunk(size_t size);
+extern void *pool_shared_memory_segment_get_chunk(size_t size);
 
 
 /* pgpool_main.c*/
-extern BackendInfo * pool_get_node_info(int node_number);
+extern BackendInfo *pool_get_node_info(int node_number);
 extern int	pool_get_node_count(void);
 extern int *pool_get_process_list(int *array_size);
-extern ProcessInfo * pool_get_process_info(pid_t pid);
+extern ProcessInfo *pool_get_process_info(pid_t pid);
 extern void pool_sleep(unsigned int second);
 extern int	PgpoolMain(bool discard_status, bool clear_memcache_oidmaps);
 extern int	pool_send_to_frontend(char *data, int len, bool flush);
 extern int	pool_frontend_exists(void);
 extern pid_t pool_waitpid(int *status);
 extern int	write_status_file(void);
-extern POOL_NODE_STATUS * verify_backend_node_status(POOL_CONNECTION_POOL_SLOT * *slots);
-extern POOL_NODE_STATUS * pool_get_node_status(void);
+extern POOL_NODE_STATUS *verify_backend_node_status(POOL_CONNECTION_POOL_SLOT **slots);
+extern POOL_NODE_STATUS *pool_get_node_status(void);
 extern void pool_set_backend_status_changed_time(int backend_id);
 extern int	get_next_main_node(void);
 extern bool pool_acquire_follow_primary_lock(bool block, bool remote_reques);
@@ -650,7 +715,11 @@ extern size_t strlcpy(char *dst, const char *src, size_t siz);
 #endif
 
 /* pool_worker_child.c */
-extern void do_worker_child(void);
-extern int	get_query_result(POOL_CONNECTION_POOL_SLOT * *slots, int backend_id, char *query, POOL_SELECT_RESULT * *res);
+extern void do_worker_child(void *params);
+extern int	get_query_result(POOL_CONNECTION_POOL_SLOT **slots, int backend_id, char *query, POOL_SELECT_RESULT **res);
+
+/* utils/pg_strong_random.c */
+void		pg_strong_random_init(void);
+bool		pg_strong_random(void *buf, size_t len);
 
 #endif							/* POOL_H */

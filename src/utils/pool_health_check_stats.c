@@ -4,7 +4,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2021	PgPool Global Development Group
+ * Copyright (c) 2003-2025	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -29,9 +29,10 @@
  * to be shared by both PCP server and clients.
  * Number of struct members will be stored in *n.
  */
-int * pool_health_check_stats_offsets(int *n)
+int *
+pool_health_check_stats_offsets(int *n)
 {
-	static 	int	offsettbl[] = {
+	static int	offsettbl[] = {
 		offsetof(POOL_HEALTH_CHECK_STATS, node_id),
 		offsetof(POOL_HEALTH_CHECK_STATS, hostname),
 		offsetof(POOL_HEALTH_CHECK_STATS, port),
@@ -54,7 +55,7 @@ int * pool_health_check_stats_offsets(int *n)
 		offsetof(POOL_HEALTH_CHECK_STATS, last_failed_health_check),
 	};
 
-	*n = sizeof(offsettbl)/sizeof(int);
+	*n = sizeof(offsettbl) / sizeof(int);
 	return offsettbl;
 }
 
@@ -64,10 +65,11 @@ int * pool_health_check_stats_offsets(int *n)
  * shared by both PCP server and clients.  Number of struct members will be
  * stored in *n.
  */
-int * pool_report_pools_offsets(int *n)
+int *
+pool_report_pools_offsets(int *n)
 {
 
-	static int offsettbl[] = {
+	static int	offsettbl[] = {
 		offsetof(POOL_REPORT_POOLS, pool_pid),
 		offsetof(POOL_REPORT_POOLS, process_start_time),
 		offsetof(POOL_REPORT_POOLS, client_connection_count),
@@ -85,9 +87,12 @@ int * pool_report_pools_offsets(int *n)
 		offsetof(POOL_REPORT_POOLS, pool_backendpid),
 		offsetof(POOL_REPORT_POOLS, pool_connected),
 		offsetof(POOL_REPORT_POOLS, status),
-		offsetof(POOL_REPORT_POOLS, load_balance_node)
+		offsetof(POOL_REPORT_POOLS, load_balance_node),
+		offsetof(POOL_REPORT_POOLS, client_host),
+		offsetof(POOL_REPORT_POOLS, client_port),
+		offsetof(POOL_REPORT_POOLS, statement)
 	};
 
-	*n = sizeof(offsettbl)/sizeof(int);
+	*n = sizeof(offsettbl) / sizeof(int);
 	return offsettbl;
 }

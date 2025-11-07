@@ -4,8 +4,8 @@
  *	  Definitions for tagged nodes.
  *
  *
- * Portions Copyright (c) 2003-2024, PgPool Global Development Group
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2003-2025, PgPool Global Development Group
+ * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/nodes.h
@@ -32,9 +32,9 @@ typedef enum NodeTag
 	T_Invalid = 0,
 
 	/* pgpool Extension */
-				T_PgpoolVariableSetStmt,
-				T_PgpoolVariableShowStmt,
-				T_PgpoolQueryCacheStmt,
+	T_PgpoolVariableSetStmt,
+	T_PgpoolVariableShowStmt,
+	T_PgpoolQueryCacheStmt,
 #include "nodetags.h"
 } NodeTag;
 
@@ -62,6 +62,7 @@ typedef enum NodeTag
  *   readfuncs.c.
  *
  * - custom_query_jumble: Has custom implementation in queryjumblefuncs.c.
+ *   Also available as a node field attribute.
  *
  * - no_copy: Does not support copyObject() at all.
  *
@@ -109,9 +110,14 @@ typedef enum NodeTag
  * - equal_ignore_if_zero: Ignore the field for equality if it is zero.
  *   (Otherwise, compare normally.)
  *
+ * - custom_query_jumble: Has custom implementation in queryjumblefuncs.c
+ *   for the field of a node.  Also available as a node attribute.
+ *
  * - query_jumble_ignore: Ignore the field for the query jumbling.  Note
  *   that typmod and collation information are usually irrelevant for the
  *   query jumbling.
+ *
+ * - query_jumble_squash: Squash multiple values during query jumbling.
  *
  * - query_jumble_location: Mark the field as a location to track.  This is
  *   only allowed for integer fields that include "location" in their name.
@@ -201,7 +207,7 @@ extern void outToken(struct StringInfoData *str, const char *s);
 extern void outBitmapset(struct StringInfoData *str,
 						 const struct Bitmapset *bms);
 extern void outDatum(struct StringInfoData *str, uintptr_t value,
-                     int typlen, bool typbyval);
+					 int typlen, bool typbyval);
 extern char *nodeToString(const void *obj);
 extern char *nodeToStringWithLocations(const void *obj);
 extern char *bmsToString(const struct Bitmapset *bms);
@@ -210,7 +216,7 @@ extern char *bmsToString(const struct Bitmapset *bms);
  * nodes/{readfuncs.c,read.c}
  */
 extern void *stringToNode(const char *str);
-#ifdef WRITE_READ_PARSE_PLAN_TREES
+#ifdef DEBUG_NODE_TESTS_ENABLED
 extern void *stringToNodeWithLocations(const char *str);
 #endif
 extern struct Bitmapset *readBitmapset(void);
@@ -314,6 +320,7 @@ typedef enum JoinType
 	 */
 	JOIN_SEMI,					/* 1 copy of each LHS row that has match(es) */
 	JOIN_ANTI,					/* 1 copy of each LHS row that has no match */
+	JOIN_RIGHT_SEMI,			/* 1 copy of each RHS row that has match(es) */
 	JOIN_RIGHT_ANTI,			/* 1 copy of each RHS row that has no match */
 
 	/*
@@ -330,10 +337,10 @@ typedef enum JoinType
 
 /*
  * OUTER joins are those for which pushed-down quals must behave differently
- * from the join's own quals.  This is in fact everything except INNER and
- * SEMI joins.  However, this macro must also exclude the JOIN_UNIQUE symbols
- * since those are temporary proxies for what will eventually be an INNER
- * join.
+ * from the join's own quals.  This is in fact everything except INNER, SEMI
+ * and RIGHT_SEMI joins.  However, this macro must also exclude the
+ * JOIN_UNIQUE symbols since those are temporary proxies for what will
+ * eventually be an INNER join.
  *
  * Note: semijoins are a hybrid case, but we choose to treat them as not
  * being outer joins.  This is okay principally because the SQL syntax makes
@@ -362,7 +369,7 @@ typedef enum AggStrategy
 	AGG_SORTED,					/* grouped agg, input must be sorted */
 	AGG_HASHED,					/* grouped agg, use internal hashtable */
 	AGG_MIXED,					/* grouped agg, hash and sort both used */
-} AggStrategy;
+}			AggStrategy;
 
 /*
  * AggSplit -
@@ -406,13 +413,13 @@ typedef enum SetOpCmd
 	SETOPCMD_INTERSECT_ALL,
 	SETOPCMD_EXCEPT,
 	SETOPCMD_EXCEPT_ALL,
-} SetOpCmd;
+}			SetOpCmd;
 
 typedef enum SetOpStrategy
 {
 	SETOP_SORTED,				/* input must be sorted */
 	SETOP_HASHED,				/* use internal hashtable */
-} SetOpStrategy;
+}			SetOpStrategy;
 
 /*
  * OnConflictAction -

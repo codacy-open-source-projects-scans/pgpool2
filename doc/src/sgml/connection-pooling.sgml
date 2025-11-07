@@ -183,12 +183,15 @@
     </term>
     <listitem>
      <para>
-      Specifies the time in seconds to terminate a <productname>Pgpool-II
-      </productname> child process if it remains idle. The new child process
+      Specifies the time in seconds to terminate
+      a <productname>Pgpool-II
+      </productname> child process if it remains idle because no client is connecting to it.
+      The new child process
       is immediately spawned by <productname>Pgpool-II</productname> when it
       is terminated because of <varname>child_life_time</varname>.
       <varname>child_life_time</varname> is a measure to prevent the
       memory leaks and other unexpected errors in <productname>Pgpool-II
+
       </productname> children.
      </para>
      <note>
@@ -281,10 +284,20 @@
     <listitem>
      <para>
       Specifies the time in seconds to terminate the cached connections
-      to the PostgreSQL backend. This serves as the cached connection expiration time.
+      to the <productname>PostgreSQL</> backend. This serves as the cached connection expiration time.
      </para>
      <para>
-      The default is 0, which means the cached connections will not be disconnected.
+      If a client connects to the process which holds the cached
+      connections, a calculation on
+      the <varname>connection_life_time</varname> is not performed
+      until the client disconnects. Thus it is possible that the cached
+      connections are kept for longer time than this value. To avoid
+      this, it is recommended to set shorter value
+      to <xref linkend="guc-client-idle-limit">.
+     </para>
+     <para>
+      The default is 0, which means the cached connections will not be
+      disconnected.
      </para>
      <para>
       This parameter can only be set at server start.
@@ -778,7 +791,7 @@
    </varlistentry>
 
    <varlistentry id="guc-log-backend-messages" xreflabel="log_backend_messages">
-    <term><varname>log_backend_messages</varname> (<type>boolean</type>)
+    <term><varname>log_backend_messages</varname> (<type>enum</type>)
      <indexterm>
       <primary><varname>log_backend_messages</varname> configuration parameter</primary>
      </indexterm>
@@ -868,7 +881,7 @@
     <listitem>
      <para>
       Setting to on, enable logging about normal PCP Process
-      fork and exit status. Default is on.
+      fork and exit status. Default is off.
      </para>
      <para>
       This parameter can be changed by reloading the <productname>Pgpool-II</> configurations.

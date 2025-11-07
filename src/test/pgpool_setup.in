@@ -23,7 +23,6 @@
 # -m r: create an installation as native replication mode.
 # -m n: create an installation as raw mode.
 # -m l: create an installation as logical replication mode.
-# -m y: create an installation as slony mode.
 # -m i: create an installation as snapshot isolation mode.
 # -n num_clusters: create num_clusters PostgreSQL database cluster nodes
 # -p base_port: specify base port. pgpool port is base_port.
@@ -76,8 +75,24 @@ PGPOOLDIR=${PGPOOLDIR:-"@@PGPOOL_CONFIG_DIR@@"}
 PGBIN=${PGBIN:-"@@PGSQL_BIN_DIR@@"}
 # LD_LIBRARY_PATH 
 LPATH=${PGLIB:-"@@PGSQL_LIB_DIR@@"}
-# unix socket directory
-PGSOCKET_DIR=${PGSOCKET_DIR:-"/tmp"}
+# unix socket directories
+PGSOCKET_DIR=${PGSOCKET_DIR:-"/tmp,/var/run/postgresql"}
+# remove inaccessible diretories from PGSOCKET_DIR
+tmp=`echo $PGSOCKET_DIR|sed "s/,/ /"`
+dir=""
+first=true
+for i in $tmp
+do
+    if [ -w $i ];then
+	if [ $first != "true" ];then
+	    dir="$dir,$i"
+	else
+	    dir=$i
+	fi
+    fi
+    first=false
+done
+PGSOCKET_DIR=$dir
 # initdb args
 INITDBARG="--no-locale -E UTF_8"
 # Use replication slot
@@ -865,6 +880,7 @@ function set_pgpool_conf {
 	echo "sr_check_password = ''"  >> $CONF
 	echo "recovery_user = '$WHOAMI'" >> $CONF
 	echo "recovery_password = ''"  >> $CONF
+	echo "recovery_database = 'template1'"  >> $CONF
 	echo "recovery_1st_stage_command = 'basebackup.sh'" >> $CONF
 
 	if [ $MODE = "r" -o $MODE = "i" ];then
@@ -1154,7 +1170,7 @@ EOF
 ################################################################################
 function usage()
 {
-	echo "usage: $0 [-m r|s|n|l|y|i] [-n num_clusters] [-p base_port] [-pg pg_base_port][--no-stop] [-d] [-s] [-r] [-e] [-t] [-c]";exit 1
+	echo "usage: $0 [-m r|s|n|l|i] [-n num_clusters] [-p base_port] [-pg pg_base_port][--no-stop] [-d] [-s] [-r] [-e] [-t] [-c]";exit 1
 }
 
 #-------------------------------------------
@@ -1178,7 +1194,6 @@ do
 			s ) MODE="s";;
 			n ) MODE="n";;
 			l ) MODE="l";;
-			y ) MODE="y";;
 			i ) MODE="i";;
 			* ) usage;;
 		esac
@@ -1229,9 +1244,6 @@ case $MODE in
 		;;
 	l ) MODENAME="logical replication mode"
 	    CLUSTERING_MODE_STR="logical_replication"
-	    ;;
-	y ) MODENAME="slony mode"
-	    CLUSTERING_MODE_STR="slony"
 	    ;;
 	i ) MODENAME="snapshot isolation mode"
 	    CLUSTERING_MODE_STR="snapshot_isolation"
@@ -1363,7 +1375,7 @@ chmod 0600 $PCP_PASS_FILE
 test ! -d run && mkdir run
 echo "pid_file_name = '$BASEDIR/run/pgpool.pid'" >> $CONF
 test ! -d log && mkdir log
-echo "logdir = '$BASEDIR/log'" >> $CONF
+echo "work_dir = '$BASEDIR/log'" >> $CONF
 
 if [ "$PGPOOLDEBUG" = "true" ];then    
     echo '$PGPOOL_INSTALL_DIR/bin/pgpool -d -D -n -f $dir/etc/pgpool.conf -F $dir/etc/pcp.conf -a $dir/etc/pool_hba.conf 2>&1 | cat > $dir/log/pgpool.log &' >> $STARTALL

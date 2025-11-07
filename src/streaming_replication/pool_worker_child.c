@@ -3,7 +3,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2024	PgPool Global Development Group
+ * Copyright (c) 2003-2025	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -69,7 +69,7 @@
 #include "watchdog/wd_internal_commands.h"
 #include "watchdog/watchdog.h"
 
-static POOL_CONNECTION_POOL_SLOT * slots[MAX_NUM_BACKENDS];
+static POOL_CONNECTION_POOL_SLOT *slots[MAX_NUM_BACKENDS];
 static volatile sig_atomic_t reload_config_request = 0;
 static volatile sig_atomic_t restart_request = 0;
 
@@ -100,13 +100,13 @@ static void sr_check_will_die(int code, Datum arg);
 #define PG10_SERVER_VERSION	100000	/* PostgreSQL 10 server version num */
 #define PG91_SERVER_VERSION	90100	/* PostgreSQL 9.1 server version num */
 
-static	volatile bool follow_primary_lock_acquired;
+static volatile bool follow_primary_lock_acquired;
 
 /*
 * worker child main loop
 */
 void
-do_worker_child(void)
+do_worker_child(void *params)
 {
 	sigjmp_buf	local_sigjmp_buf;
 	MemoryContext WorkerMemoryContext;
@@ -146,6 +146,14 @@ do_worker_child(void)
 	/* Initialize per process context */
 	pool_init_process_context();
 
+	/*
+	 * Open pool_passwd.
+	 */
+	if (strcmp("", pool_config->pool_passwd))
+	{
+		pool_reopen_passwd_file();
+	}
+
 	if (sigsetjmp(local_sigjmp_buf, 1) != 0)
 	{
 		pool_signal(SIGALRM, SIG_IGN);
@@ -162,13 +170,14 @@ do_worker_child(void)
 	{
 		MemoryContextSwitchTo(WorkerMemoryContext);
 		MemoryContextResetAndDeleteChildren(WorkerMemoryContext);
+
 		/*
 		 * Since WorkerMemoryContext is used for "slots", we need to clear it
 		 * so that new slots are allocated later on.
 		 */
 		memset(slots, 0, sizeof(slots));
-		
-		bool	watchdog_leader;	/* true if I am the watchdog leader */
+
+		bool		watchdog_leader;	/* true if I am the watchdog leader */
 
 
 		CHECK_REQUEST;
@@ -185,11 +194,12 @@ do_worker_child(void)
 		if (pool_config->use_watchdog)
 		{
 			WD_STATES	wd_status;
-			WDPGBackendStatus	*backendStatus;
+			WDPGBackendStatus *backendStatus;
 
 			wd_status = wd_internal_get_watchdog_local_node_state();
 			ereport(DEBUG1,
 					(errmsg("watchdog status: %d", wd_status)));
+
 			/*
 			 * Ask the watchdog to get all the backend states from the
 			 * Leader/Coordinator Pgpool-II node.
@@ -198,14 +208,15 @@ do_worker_child(void)
 			backendStatus = get_pg_backend_status_from_leader_wd_node();
 
 			if (!backendStatus)
+
 				/*
 				 * Couldn't get leader status.
 				 */
 				watchdog_leader = false;
 			else
 			{
-				int	quorum = wd_internal_get_watchdog_quorum_state();
-				int	node_count = backendStatus->node_count;
+				int			quorum = wd_internal_get_watchdog_quorum_state();
+				int			node_count = backendStatus->node_count;
 
 				ereport(DEBUG1,
 						(errmsg("quorum: %d node_count: %d",
@@ -213,8 +224,8 @@ do_worker_child(void)
 				if (quorum >= 0 && backendStatus->node_count <= 0)
 				{
 					/*
-					 * Quorum exists and node_count <= 0.
-					 * Definitely I am the leader.
+					 * Quorum exists and node_count <= 0. Definitely I am the
+					 * leader.
 					 */
 					watchdog_leader = true;
 				}
@@ -226,14 +237,15 @@ do_worker_child(void)
 		}
 
 		/*
-		 * If streaming replication mode, do time lag checking
-		 * Also skip if failover/failback is ongoing.
+		 * If streaming replication mode, do time lag checking Also skip if
+		 * failover/failback is ongoing.
 		 */
 		if (pool_config->sr_check_period > 0 && STREAM &&
 			Req_info->switching == false)
 		{
 			/*
-			 * Acquire follow primary lock. If fail to acquire lock, try again.
+			 * Acquire follow primary lock. If fail to acquire lock, try
+			 * again.
 			 */
 			follow_primary_lock_acquired = false;
 
@@ -265,6 +277,7 @@ do_worker_child(void)
 
 							ereport(LOG,
 									(errmsg("pgpool_worker_child: invalid node found %d", i)));
+
 							/*
 							 * If detach_false_primary is enabled, send
 							 * degenerate request to detach invalid node.
@@ -283,17 +296,17 @@ do_worker_child(void)
 									(pool_config->use_watchdog && watchdog_leader))
 								{
 									n = i;
+
 									/*
 									 * In the case watchdog enabled, we need
 									 * to add REQ_DETAIL_CONFIRMED, which
-									 * means no quorum consensus is
-									 * required. If we do not add this, the
-									 * target node will remain quarantine
-									 * state since other node does not request
-									 * failover.
+									 * means no quorum consensus is required.
+									 * If we do not add this, the target node
+									 * will remain quarantine state since
+									 * other node does not request failover.
 									 */
 									degenerate_backend_set(&n, 1,
-														   REQ_DETAIL_SWITCHOVER|REQ_DETAIL_CONFIRMED);
+														   REQ_DETAIL_SWITCHOVER | REQ_DETAIL_CONFIRMED);
 								}
 								else if (pool_config->use_watchdog)
 									ereport(LOG,
@@ -388,15 +401,15 @@ check_replication_time_lag(void)
 	int			i;
 	POOL_SELECT_RESULT *res;
 	POOL_SELECT_RESULT *res_rep;	/* query results of pg_stat_replication */
-	uint64	lsn[MAX_NUM_BACKENDS];
+	uint64		lsn[MAX_NUM_BACKENDS];
 	char	   *query;
 	char	   *stat_rep_query;
 	BackendInfo *bkinfo;
-	uint64	lag;
-	uint64	delay_threshold_by_time;
+	uint64		lag;
+	uint64		delay_threshold_by_time;
 	ErrorContextCallback callback;
-	int		active_standby_node;
-	bool	replication_delay_by_time;
+	int			active_standby_node;
+	bool		replication_delay_by_time;
 
 	/* clear replication state */
 	for (i = 0; i < NUM_BACKENDS; i++)
@@ -517,7 +530,7 @@ check_replication_time_lag(void)
 	 */
 	if (slots[PRIMARY_NODE_ID] && stat_rep_query != NULL)
 	{
-		int		status;
+		int			status;
 
 		status = get_query_result(slots, PRIMARY_NODE_ID, stat_rep_query, &res_rep);
 
@@ -539,27 +552,27 @@ check_replication_time_lag(void)
 
 			if (status == 0)
 			{
-				int		j;
-				char	*s;
+				int			j;
+				char	   *s;
 #define	NUM_COLS 4
 
 				for (j = 0; j < res_rep->numrows; j++)
 				{
-					if (strcmp(res_rep->data[j*NUM_COLS], bkinfo->backend_application_name) == 0)
+					if (strcmp(res_rep->data[j * NUM_COLS], bkinfo->backend_application_name) == 0)
 					{
 						/*
-						 * If sr_check_user has enough privilege, it should return
-						 * some string. If not, NULL pointer will be returned for
-						 * res_rep->data[1] and [2]. So we need to prepare for the
-						 * latter case.
+						 * If sr_check_user has enough privilege, it should
+						 * return some string. If not, NULL pointer will be
+						 * returned for res_rep->data[1] and [2]. So we need
+						 * to prepare for the latter case.
 						 */
-						s = res_rep->data[j*NUM_COLS+1]? res_rep->data[j*NUM_COLS+1] : "";
+						s = res_rep->data[j * NUM_COLS + 1] ? res_rep->data[j * NUM_COLS + 1] : "";
 						strlcpy(bkinfo->replication_state, s, NAMEDATALEN);
 
-						s = res_rep->data[j*NUM_COLS+2]? res_rep->data[j*NUM_COLS+2] : "";
+						s = res_rep->data[j * NUM_COLS + 2] ? res_rep->data[j * NUM_COLS + 2] : "";
 						strlcpy(bkinfo->replication_sync_state, s, NAMEDATALEN);
 
-						s = res_rep->data[j*NUM_COLS+3];
+						s = res_rep->data[j * NUM_COLS + 3];
 						if (s)
 						{
 							bkinfo->standby_delay = atol(s);
@@ -614,7 +627,9 @@ check_replication_time_lag(void)
 			{
 				lag = bkinfo->standby_delay;
 				delay_threshold_by_time = pool_config->delay_threshold_by_time;
-				delay_threshold_by_time *= 1000;	/* convert from milli seconds to micro seconds */
+				delay_threshold_by_time *= 1000;	/* convert from milli
+													 * seconds to micro
+													 * seconds */
 
 				/* Log delay if necessary */
 				if ((pool_config->log_standby_delay == LSD_ALWAYS && lag > 0) ||
@@ -623,7 +638,7 @@ check_replication_time_lag(void)
 				{
 					ereport(LOG,
 							(errmsg("Replication of node: %d is behind %.6f second(s) from the primary server (node: %d)",
-									i, ((float)lag)/1000000, PRIMARY_NODE_ID)));
+									i, ((float) lag) / 1000000, PRIMARY_NODE_ID)));
 				}
 			}
 			else
@@ -635,7 +650,7 @@ check_replication_time_lag(void)
 				{
 					ereport(LOG,
 							(errmsg("Replication of node: %d is behind " UINT64_FORMAT " bytes from the primary server (node: %d)",
-									i, (uint64)(lsn[PRIMARY_NODE_ID] - lsn[i]), PRIMARY_NODE_ID)));
+									i, (uint64) (lsn[PRIMARY_NODE_ID] - lsn[i]), PRIMARY_NODE_ID)));
 				}
 			}
 		}
@@ -666,7 +681,7 @@ text_to_lsn(char *text)
 	unsigned int xrecoff;
 	unsigned long long int lsn;
 
-	if (sscanf(text, "%X/%X", &xlogid, &xrecoff) !=2)
+	if (sscanf(text, "%X/%X", &xlogid, &xrecoff) != 2)
 	{
 		ereport(ERROR,
 				(errmsg("invalid LSN format"),
@@ -731,6 +746,10 @@ reload_config(void)
 	MemoryContextSwitchTo(oldContext);
 	if (pool_config->enable_pool_hba)
 		load_hba(get_hba_file_name());
+
+	if (strcmp("", pool_config->pool_passwd))
+		pool_reopen_passwd_file();
+
 	reload_config_request = 0;
 }
 
@@ -741,7 +760,7 @@ reload_config(void)
  * is guaranteed that no exception occurs within this function.
  */
 int
-get_query_result(POOL_CONNECTION_POOL_SLOT * *slots, int backend_id, char *query, POOL_SELECT_RESULT * *res)
+get_query_result(POOL_CONNECTION_POOL_SLOT **slots, int backend_id, char *query, POOL_SELECT_RESULT **res)
 {
 	int			sts = -1;
 	MemoryContext oldContext = CurrentMemoryContext;

@@ -136,6 +136,13 @@
   </para>
  </note>
 
+ <note>
+  <para>
+   関数が同じ名前で複数登録されていて、その中にTIMESTAMP WITH TIMEZONE、TIME WITH TIMEZONEを返す関数が含まれている場合、実際にSQL文の中で使われている関数がTIMESTAMP WITH TIMEZONEを返さないものであっても、<productname>Pgpool-II</productname>は、キャッシュできないと判断します。
+   その場合は、その関数のラッパー関数を作成し、TIMESTAMP WITHOUT TIMEZONEあるいはTIME WITHOUT TIMEZONEを返すようにするか、/*FORCE QUERY CACHE*/コメントを使用することによってクエリキャッシュが使えます。
+  </para>
+ </note>
+
  <para>
   <!--
   In memory cache saves the pair of SELECT statement
@@ -249,7 +256,7 @@
   <variablelist>
 
    <varlistentry id="guc-memqcache-method" xreflabel="memqcache_method">
-    <term><varname>memqcache_method</varname> (<type>string</type>)
+    <term><varname>memqcache_method</varname> (<type>enum</type>)
      <indexterm>
       <!--
       <primary><varname>memqcache_method</varname> configuration parameter</primary>
@@ -283,7 +290,7 @@
 
        <tbody>
 	<row>
-	 <entry><literal>'shmem'</literal></entry>
+	 <entry><literal>shmem</literal></entry>
 	 <!--
 	 <entry>Use shared memory</entry>
 	 -->
@@ -291,7 +298,7 @@
 	</row>
 
 	<row>
-	 <entry><literal>'memcached'</literal></entry>
+	 <entry><literal>memcached</literal></entry>
 	 <!--
 	 <entry>Use <ulink url="http://memcached.org/">memcached</ulink></entry>
 	 -->
@@ -331,9 +338,9 @@
 
      <para>
       <!--
-      Default is <literal>'shmem'</literal>.
+      Default is <literal>shmem</literal>.
       -->
-      デフォルトは<literal>'shmem'</literal>です。
+      デフォルトは<literal>shmem</literal>です。
      </para>
 
      <para>
@@ -660,7 +667,7 @@
       <!--
       This parameter can be changed by reloading the <productname>Pgpool-II</> configurations.
       -->
-      このパラメータは<productname>Pgpool-II</>の設定を再読み込みすることで変更可能です。
+      このパラメータはサーバ起動時にのみ設定可能です。
      </para>
     </listitem>
    </varlistentry>

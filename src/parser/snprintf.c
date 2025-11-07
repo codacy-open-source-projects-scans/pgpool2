@@ -1,9 +1,9 @@
 /*
- * Copyright (c) 2003-2024, PgPool Global Development Group
+ * Copyright (c) 2003-2025, PgPool Global Development Group
  * Copyright (c) 1983, 1995, 1996 Eric P. Allman
  * Copyright (c) 1988, 1993
  *	The Regents of the University of California.  All rights reserved.
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,17 +32,14 @@
  * src/port/snprintf.c
  */
 
-#if 0
-#include "c.h"
-#endif
-
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include "pool_parser.h"
 #include "stringinfo.h"
 #include "utils/palloc.h"
@@ -188,7 +185,7 @@ typedef struct
 	FILE	   *stream;			/* eventual output destination, or NULL */
 	int			nchars;			/* # chars sent to stream, or dropped */
 	bool		failed;			/* call is a failure; errno is set */
-} PrintfTarget;
+}			PrintfTarget;
 
 /*
  * Info about the type and value of a formatting parameter.  Note that we
@@ -204,7 +201,7 @@ typedef enum
 	ATYPE_LONGLONG,
 	ATYPE_DOUBLE,
 	ATYPE_CHARPTR
-} PrintfArgType;
+}			PrintfArgType;
 
 typedef union
 {
@@ -213,11 +210,11 @@ typedef union
 	long long	ll;
 	double		d;
 	char	   *cptr;
-} PrintfArgValue;
+}			PrintfArgValue;
 
 
-static void flushbuffer(PrintfTarget *target);
-static void dopr(PrintfTarget *target, const char *format, va_list args);
+static void flushbuffer(PrintfTarget * target);
+static void dopr(PrintfTarget * target, const char *format, va_list args);
 
 
 /*
@@ -354,7 +351,7 @@ pg_printf(const char *fmt,...)
  * buffer in any case.  Call this only when target->stream is defined.
  */
 static void
-flushbuffer(PrintfTarget *target)
+flushbuffer(PrintfTarget * target)
 {
 	size_t		nc = target->bufptr - target->bufstart;
 
@@ -376,34 +373,43 @@ flushbuffer(PrintfTarget *target)
 
 
 static bool find_arguments(const char *format, va_list args,
-						   PrintfArgValue *argvalues);
+						   PrintfArgValue * argvalues);
 static void fmtstr(const char *value, int leftjust, int minlen, int maxwidth,
-				   int pointflag, PrintfTarget *target);
-static void fmtptr(const void *value, PrintfTarget *target);
+				   int pointflag, PrintfTarget * target);
+static void fmtptr(const void *value, PrintfTarget * target);
 static void fmtint(long long value, char type, int forcesign,
 				   int leftjust, int minlen, int zpad, int precision, int pointflag,
-				   PrintfTarget *target);
-static void fmtchar(int value, int leftjust, int minlen, PrintfTarget *target);
+				   PrintfTarget * target);
+static void fmtchar(int value, int leftjust, int minlen, PrintfTarget * target);
 static void fmtfloat(double value, char type, int forcesign,
 					 int leftjust, int minlen, int zpad, int precision, int pointflag,
-					 PrintfTarget *target);
-static void dostr(const char *str, int slen, PrintfTarget *target);
-static void dopr_outch(int c, PrintfTarget *target);
-static void dopr_outchmulti(int c, int slen, PrintfTarget *target);
+					 PrintfTarget * target);
+static void dostr(const char *str, int slen, PrintfTarget * target);
+static void dopr_outch(int c, PrintfTarget * target);
+static void dopr_outchmulti(int c, int slen, PrintfTarget * target);
 static int	adjust_sign(int is_negative, int forcesign, int *signvalue);
 static int	compute_padlen(int minlen, int vallen, int leftjust);
 static void leading_pad(int zpad, int signvalue, int *padlen,
-						PrintfTarget *target);
-static void trailing_pad(int padlen, PrintfTarget *target);
+						PrintfTarget * target);
+static void trailing_pad(int padlen, PrintfTarget * target);
 
 /*
- * If strchrnul exists (it's a glibc-ism), it's a good bit faster than the
- * equivalent manual loop.  If it doesn't exist, provide a replacement.
+ * If strchrnul exists (it's a glibc-ism, but since adopted by some other
+ * platforms), it's a good bit faster than the equivalent manual loop.
+ * Use it if possible, and if it doesn't exist, use this replacement.
  *
  * Note: glibc declares this as returning "char *", but that would require
  * casting away const internally, so we don't follow that detail.
+ *
+ * Note: macOS has this too as of Sequoia 15.4, but it's hidden behind
+ * a deployment-target check that causes compile errors if the deployment
+ * target isn't high enough.  So !HAVE_DECL_STRCHRNUL may mean "yes it's
+ * declared, but it doesn't compile".  To avoid failing in that scenario,
+ * use a macro to avoid matching <string.h>'s name.
  */
-#ifndef HAVE_STRCHRNUL
+#if !HAVE_DECL_STRCHRNUL
+
+#define strchrnul pg_strchrnul
 
 static inline const char *
 strchrnul(const char *s, int c)
@@ -413,26 +419,14 @@ strchrnul(const char *s, int c)
 	return s;
 }
 
-#else
-
-/*
- * glibc's <string.h> declares strchrnul only if _GNU_SOURCE is defined.
- * While we typically use that on glibc platforms, configure will set
- * HAVE_STRCHRNUL whether it's used or not.  Fill in the missing declaration
- * so that this file will compile cleanly with or without _GNU_SOURCE.
- */
-#ifndef _GNU_SOURCE
-extern char *strchrnul(const char *s, int c);
-#endif
-
-#endif							/* HAVE_STRCHRNUL */
+#endif							/* !HAVE_DECL_STRCHRNUL */
 
 
 /*
  * dopr(): the guts of *printf for all cases.
  */
 static void
-dopr(PrintfTarget *target, const char *format, va_list args)
+dopr(PrintfTarget * target, const char *format, va_list args)
 {
 	int			save_errno = errno;
 	const char *first_pct = NULL;
@@ -619,6 +613,28 @@ nextch2:
 					fmtpos = accum;
 				accum = 0;
 				goto nextch2;
+#ifdef WIN32
+			case 'I':
+				/* Windows PRI*{32,64,PTR} size */
+				if (format[0] == '3' && format[1] == '2')
+					format += 2;
+				else if (format[0] == '6' && format[1] == '4')
+				{
+					format += 2;
+					longlongflag = 1;
+				}
+				else
+				{
+#if SIZEOF_VOID_P == SIZEOF_LONG
+					longflag = 1;
+#elif SIZEOF_VOID_P == SIZEOF_LONG_LONG
+					longlongflag = 1;
+#else
+#error "cannot find integer type of the same size as intptr_t"
+#endif
+				}
+				goto nextch2;
+#endif
 			case 'l':
 				if (longflag)
 					longlongflag = 1;
@@ -626,16 +642,12 @@ nextch2:
 					longflag = 1;
 				goto nextch2;
 			case 'z':
-#if SIZEOF_SIZE_T == 8
-#ifdef HAVE_LONG_INT_64
+#if SIZEOF_SIZE_T == SIZEOF_LONG
 				longflag = 1;
-#elif defined(HAVE_LONG_LONG_INT_64)
+#elif SIZEOF_SIZE_T == SIZEOF_LONG_LONG
 				longlongflag = 1;
 #else
-#error "Don't know how to print 64bit integers"
-#endif
-#else
-				/* assume size_t is same size as int */
+#error "cannot find integer type of the same size as size_t"
 #endif
 				goto nextch2;
 			case 'h':
@@ -806,7 +818,7 @@ bad_format:
  */
 static bool
 find_arguments(const char *format, va_list args,
-			   PrintfArgValue *argvalues)
+			   PrintfArgValue * argvalues)
 {
 	int			ch;
 	bool		afterstar;
@@ -886,6 +898,28 @@ nextch1:
 					fmtpos = accum;
 				accum = 0;
 				goto nextch1;
+#ifdef WIN32
+			case 'I':
+				/* Windows PRI*{32,64,PTR} size */
+				if (format[0] == '3' && format[1] == '2')
+					format += 2;
+				else if (format[0] == '6' && format[1] == '4')
+				{
+					format += 2;
+					longlongflag = 1;
+				}
+				else
+				{
+#if SIZEOF_VOID_P == SIZEOF_LONG
+					longflag = 1;
+#elif SIZEOF_VOID_P == SIZEOF_LONG_LONG
+					longlongflag = 1;
+#else
+#error "cannot find integer type of the same size as intptr_t"
+#endif
+				}
+				goto nextch1;
+#endif
 			case 'l':
 				if (longflag)
 					longlongflag = 1;
@@ -893,16 +927,12 @@ nextch1:
 					longflag = 1;
 				goto nextch1;
 			case 'z':
-#if SIZEOF_SIZE_T == 8
-#ifdef HAVE_LONG_INT_64
+#if SIZEOF_SIZE_T == SIZEOF_LONG
 				longflag = 1;
-#elif defined(HAVE_LONG_LONG_INT_64)
+#elif SIZEOF_SIZE_T == SIZEOF_LONG_LONG
 				longlongflag = 1;
 #else
-#error "Don't know how to print 64bit integers"
-#endif
-#else
-				/* assume size_t is same size as int */
+#error "cannot find integer type of the same size as size_t"
 #endif
 				goto nextch1;
 			case 'h':
@@ -1024,7 +1054,7 @@ nextch1:
 
 static void
 fmtstr(const char *value, int leftjust, int minlen, int maxwidth,
-	   int pointflag, PrintfTarget *target)
+	   int pointflag, PrintfTarget * target)
 {
 	int			padlen,
 				vallen;			/* amount to pad */
@@ -1052,7 +1082,7 @@ fmtstr(const char *value, int leftjust, int minlen, int maxwidth,
 }
 
 static void
-fmtptr(const void *value, PrintfTarget *target)
+fmtptr(const void *value, PrintfTarget * target)
 {
 	int			vallen;
 	char		convert[64];
@@ -1068,7 +1098,7 @@ fmtptr(const void *value, PrintfTarget *target)
 static void
 fmtint(long long value, char type, int forcesign, int leftjust,
 	   int minlen, int zpad, int precision, int pointflag,
-	   PrintfTarget *target)
+	   PrintfTarget * target)
 {
 	unsigned long long uvalue;
 	int			base;
@@ -1177,7 +1207,7 @@ fmtint(long long value, char type, int forcesign, int leftjust,
 }
 
 static void
-fmtchar(int value, int leftjust, int minlen, PrintfTarget *target)
+fmtchar(int value, int leftjust, int minlen, PrintfTarget * target)
 {
 	int			padlen;			/* amount to pad */
 
@@ -1197,7 +1227,7 @@ fmtchar(int value, int leftjust, int minlen, PrintfTarget *target)
 static void
 fmtfloat(double value, char type, int forcesign, int leftjust,
 		 int minlen, int zpad, int precision, int pointflag,
-		 PrintfTarget *target)
+		 PrintfTarget * target)
 {
 	int			signvalue = 0;
 	int			prec;
@@ -1433,7 +1463,7 @@ fail:
 
 
 static void
-dostr(const char *str, int slen, PrintfTarget *target)
+dostr(const char *str, int slen, PrintfTarget * target)
 {
 	/* fast path for common case of slen == 1 */
 	if (slen == 1)
@@ -1470,7 +1500,7 @@ dostr(const char *str, int slen, PrintfTarget *target)
 }
 
 static void
-dopr_outch(int c, PrintfTarget *target)
+dopr_outch(int c, PrintfTarget * target)
 {
 	if (target->bufend != NULL && target->bufptr >= target->bufend)
 	{
@@ -1486,7 +1516,7 @@ dopr_outch(int c, PrintfTarget *target)
 }
 
 static void
-dopr_outchmulti(int c, int slen, PrintfTarget *target)
+dopr_outchmulti(int c, int slen, PrintfTarget * target)
 {
 	/* fast path for common case of slen == 1 */
 	if (slen == 1)
@@ -1551,7 +1581,7 @@ compute_padlen(int minlen, int vallen, int leftjust)
 
 
 static void
-leading_pad(int zpad, int signvalue, int *padlen, PrintfTarget *target)
+leading_pad(int zpad, int signvalue, int *padlen, PrintfTarget * target)
 {
 	int			maxpad;
 
@@ -1587,7 +1617,7 @@ leading_pad(int zpad, int signvalue, int *padlen, PrintfTarget *target)
 
 
 static void
-trailing_pad(int padlen, PrintfTarget *target)
+trailing_pad(int padlen, PrintfTarget * target)
 {
 	if (padlen < 0)
 		dopr_outchmulti(' ', -padlen, target);

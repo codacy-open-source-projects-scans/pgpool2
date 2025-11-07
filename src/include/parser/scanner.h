@@ -8,8 +8,8 @@
  * higher-level API provided by parser.h.
  *
  *
- * Portions Copyright (c) 2003-2024, PgPool Global Development Group
- * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2003-2025, PgPool Global Development Group
+ * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/parser/scanner.h
@@ -136,18 +136,18 @@ extern PGDLLIMPORT const uint16 ScanKeywordTokens[];
 
 /* Entry points in parser/scan.l */
 extern core_yyscan_t scanner_init(const char *str,
-                                  int slen,
+								  int slen,
 								  core_yy_extra_type *yyext,
 								  const ScanKeywordList *keywordlist,
 								  const uint16 *keyword_tokens);
 extern void scanner_finish(core_yyscan_t yyscanner);
-extern int	core_yylex(core_YYSTYPE *yylval_param, YYLTYPE *yylloc_param,
+extern int	core_yylex(core_YYSTYPE *yylval_param, YYLTYPE * yylloc_param,
 					   core_yyscan_t yyscanner);
 extern int	scanner_errposition(int location, core_yyscan_t yyscanner);
 extern void setup_scanner_errposition_callback(ScannerCallbackState *scbstate,
 											   core_yyscan_t yyscanner,
 											   int location);
 extern void cancel_scanner_errposition_callback(ScannerCallbackState *scbstate);
-extern void scanner_yyerror(const char *message, core_yyscan_t yyscanner) pg_attribute_noreturn();
+pg_noreturn extern void scanner_yyerror(const char *message, core_yyscan_t yyscanner);
 
 #endif							/* SCANNER_H */
