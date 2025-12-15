@@ -4,7 +4,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2024	PgPool Global Development Group
+ * Copyright (c) 2003-2025	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -4567,7 +4567,7 @@ BackendFlagsShowFunc(int index)
 		if (*buffer == '\0')
 			snprintf(buffer, sizeof(buffer), "ALWAYS_PRIMARY");
 		else
-			snprintf(buffer + strlen(buffer), sizeof(buffer), "|ALWAYS_PRIMARY");
+			strncat(buffer, "|ALWAYS_PRIMARY", 16);
 	}
 	return buffer;
 }
@@ -5433,7 +5433,7 @@ SetHBDestIfFunc(int elevel)
 						strlcpy(g_pool_config.hb_local_if[local_if_idx].addr, addrs[j], WD_MAX_HOST_NAMELEN - 1);
 						g_pool_config.hb_local_if[local_if_idx].dest_port = hbNodeInfo->dest_port;
 
-						if (n_if_name > j )
+						if (n_if_name > j)
 							strlcpy(g_pool_config.hb_local_if[local_if_idx].if_name, if_names[j], WD_MAX_IF_NAME_LEN - 1);
 						else
 							g_pool_config.hb_local_if[local_if_idx].if_name[0] = '\0';
@@ -5442,7 +5442,7 @@ SetHBDestIfFunc(int elevel)
 						local_if_idx++;
 					}
 
-					if (n_if_name > j )
+					if (n_if_name > j)
 						pfree(if_names[j]);
 
 					pfree(addrs[j]);

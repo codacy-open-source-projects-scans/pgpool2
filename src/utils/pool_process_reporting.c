@@ -1117,6 +1117,8 @@ get_config(int *nrows)
 
 	StrNCpy(status[i].name, "memqcache_stats_start_time", POOLCONFIG_MAXNAMELEN);
 	snprintf(status[i].value, POOLCONFIG_MAXVALLEN, "%s", ctime(&pool_get_memqcache_stats()->start_time));
+	/* remove a newline added by ctime() */
+	*(strchrnul(status[i].value, '\n')) = '\0';
 	StrNCpy(status[i].desc, "Start time of query cache stats", POOLCONFIG_MAXDESCLEN);
 	i++;
 
@@ -2071,7 +2073,7 @@ get_health_check_stats(int *nrows)
 
 		/* status last changed */
 		t = bi->status_changed_time;
-		ereport(LOG,(errmsg("status_changed_time %lld", (long long)t)));
+		ereport(LOG, (errmsg("status_changed_time %lld", (long long) t)));
 		strftime(stats[i].last_status_change, POOLCONFIG_MAXDATELEN, "%F %T", localtime(&t));
 
 		snprintf(stats[i].total_count, POOLCONFIG_MAXLONGCOUNTLEN, UINT64_FORMAT, health_check_stats[i].total_count);
