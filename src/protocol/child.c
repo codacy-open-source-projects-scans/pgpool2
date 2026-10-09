@@ -57,6 +57,7 @@
 #include "utils/elog.h"
 #include "utils/ps_status.h"
 #include "utils/timestamp.h"
+#include "utils/pool_track_table_mutation.h"
 
 #include "context/pool_process_context.h"
 #include "context/pool_session_context.h"
@@ -72,6 +73,8 @@ static StartupPacket *read_startup_packet(POOL_CONNECTION *cp);
 static POOL_CONNECTION_POOL *connect_backend(StartupPacket *sp, POOL_CONNECTION *frontend);
 static RETSIGTYPE die(int sig);
 static RETSIGTYPE close_idle_connection(int sig);
+static void close_idle_connection_now(void);
+static void check_close_idle_connection_request(void);
 static RETSIGTYPE wakeup_handler(int sig);
 static RETSIGTYPE reload_config_handler(int sig);
 static RETSIGTYPE authentication_timeout(int sig);
@@ -111,6 +114,15 @@ static volatile sig_atomic_t alarm_enabled = false;
  * Ignore SIGUSR1 if requested. Used when DROP DATABASE is requested.
  */
 volatile sig_atomic_t ignore_sigusr1 = 0;
+
+/*
+ * Set by close_idle_connection() (SIGUSR1 handler) so the work is deferred to
+ * a safe point in the PT_CHILD main loop. The handler body must not call
+ * pfree(), pool_write(), or any OpenSSL routine — none of which are
+ * async-signal-safe and several of which (SSL_*, the palloc/pfree free-list)
+ * can be re-entered while the main loop is mid-mutation.
+ */
+static volatile sig_atomic_t close_idle_connection_pending = 0;
 
 /*
  * si modules use SIGUSR2
@@ -212,6 +224,13 @@ do_child(int *fds)
 
 	/* Initialize per process context */
 	pool_init_process_context();
+
+	/* Initialize track table mutation child state for cold start tracking */
+	if (pool_config->disable_load_balance_on_write ==
+		DLBOW_DML_ADAPTIVE_GLOBAL)
+	{
+		pool_track_table_mutation_child_init();
+	}
 
 	/* initialize connection pool */
 	if (pool_init_cp())
@@ -323,6 +342,7 @@ do_child(int *fds)
 		check_stop_request();
 		check_restart_request();
 		check_exit_request();
+		check_close_idle_connection_request();
 		accepted = 0;
 		/* Destroy session context for just in case... */
 		pool_session_context_destroy();
@@ -1179,15 +1199,41 @@ static RETSIGTYPE die(int sig)
 
 /*
  * signal handler for SIGUSR1
- * close all idle connections
+ *
+ * Async-signal-safe body only: just record that a close-idle request has
+ * arrived. The actual work (which calls pfree(), pool_write(), and OpenSSL
+ * SSL_shutdown/SSL_free, none of which are async-signal-safe) is performed
+ * by close_idle_connection_now() at a safe point in the main loop.
  */
 static RETSIGTYPE close_idle_connection(int sig)
+{
+	close_idle_connection_pending = 1;
+}
+
+/*
+ * Process a pending SIGUSR1 close-idle request from the child main loop.
+ * Must NOT be called from signal context.
+ */
+static void
+check_close_idle_connection_request(void)
+{
+	if (!close_idle_connection_pending)
+		return;
+	close_idle_connection_pending = 0;
+	close_idle_connection_now();
+}
+
+/*
+ * Close all idle connections. Original body of close_idle_connection(),
+ * relocated out of signal context.
+ */
+static void
+close_idle_connection_now(void)
 {
 	int			i,
 				j;
 	POOL_CONNECTION_POOL *p = pool_connection_pool;
 	ConnectionInfo *info;
-	int			save_errno = errno;
 	int			main_node_id;
 
 	/*
@@ -1234,8 +1280,6 @@ static RETSIGTYPE close_idle_connection(int sig)
 			memset(p->info, 0, sizeof(ConnectionInfo));
 		}
 	}
-
-	errno = save_errno;
 }
 
 /*
@@ -1470,12 +1514,26 @@ pool_initialize_private_backend_status(void)
 
 	for (i = 0; i < MAX_NUM_BACKENDS; i++)
 	{
-		private_backend_status[i] = BACKEND_INFO(i).backend_status;
+		private_backend_status[i] =
+			*(volatile BACKEND_STATUS *) &BACKEND_INFO(i).backend_status;
 		/* my_backend_status is referred to by VALID_BACKEND macro. */
 		my_backend_status[i] = &private_backend_status[i];
 	}
 
-	my_main_node_id = REAL_MAIN_NODE_ID;
+	my_main_node_id = *(volatile int *) &REAL_MAIN_NODE_ID;
+
+	/*
+	 * REAL_MAIN_NODE_ID and the per-node status are read from shared memory
+	 * non-atomically, so a concurrent failover can leave my_main_node_id
+	 * pointing at a node we just captured as down. Re-point it at the first
+	 * node that is up in our private snapshot; otherwise MAIN_CONNECTION()
+	 * would dereference a connection slot that is never created for a down
+	 * node.
+	 */
+	if (my_main_node_id < 0 || my_main_node_id >= NUM_BACKENDS ||
+		(private_backend_status[my_main_node_id] != CON_UP &&
+		 private_backend_status[my_main_node_id] != CON_CONNECT_WAIT))
+		my_main_node_id = get_next_main_node();
 }
 
 static void
@@ -2062,7 +2120,7 @@ retry_startup:
 				 errdetail("failover or failback event detected, discarding existing connections")));
 
 		pool_get_my_process_info()->need_to_restart = 0;
-		close_idle_connection(0);
+		close_idle_connection_now();
 		pool_initialize_private_backend_status();
 	}
 

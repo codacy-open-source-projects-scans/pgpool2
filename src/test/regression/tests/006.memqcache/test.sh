@@ -20,11 +20,24 @@ function del_details_from_error
     cat|sed -e '/ErrorResponse/s/ F .*//' -e '/NoticeResponse/s/ F .*$//'
 }
 
-for mode in s r n
+# s_dlbw* are tests for streaming replication mode + disable_load_balance_on_write
+for mode in s r n \
+	      s_dlbw_trans_transaction \
+	      s_dlbw_dml_adaptive \
+	      s_dlbw_always
 do
+	echo "======== testing mode: $mode ========="
 	rm -fr $TESTDIR
 	mkdir $TESTDIR
 	cd $TESTDIR
+
+	if [[ $mode =~ (s_dlbw_*) ]];then
+	    opt=`echo $mode|sed s"/s_dlbw_//"`
+	    echo $opt
+	    mode="s"
+	else
+	    opt=""
+	fi
 
 # create test environment
 	echo -n "creating test environment..."
@@ -37,6 +50,16 @@ do
 	echo "log_per_node_statement = on" >> etc/pgpool.conf
 	echo "log_client_messages = on" >> etc/pgpool.conf
 	echo "log_min_messages = debug5" >> etc/pgpool.conf
+	if [ "$opt" != "" ];then
+	    echo "disable_load_balance_on_write = $opt" >> etc/pgpool.conf
+	    echo "set disable_load_balance_on_write = $opt"
+	fi
+
+	# set synchronous replication to avoid replication delay
+	if [ $mode = "s" ];then
+	    echo "synchronous_commit = remote_apply" >> data0/postgresql.conf
+	    echo "synchronous_standby_names = 'server1'" >> data0/postgresql.conf
+	fi
 
 	source ./bashrc.ports
 
@@ -544,6 +567,10 @@ echo "memory_cache_enabled = on" >> etc/pgpool.conf
 echo "log_per_node_statement = on" >> etc/pgpool.conf
 echo "log_client_messages = on" >> etc/pgpool.conf
 echo "log_min_messages = debug5" >> etc/pgpool.conf
+# set synchronous replication to avoid replication delay
+echo "synchronous_commit = remote_apply" >> data0/postgresql.conf
+echo "synchronous_standby_names = 'server1'" >> data0/postgresql.conf
+
 cd ..
 
 for i in 1 2 3 4 4 5 6 7
@@ -575,7 +602,7 @@ do
     fi
     ./startall
     wait_for_pgpool_startup
-    timeout 1 $PGPROTO -d test -f ../query_cache_bug$i.data |& del_details_from_error > result
+    timeout 5 $PGPROTO -d test -f ../query_cache_bug$i.data |& del_details_from_error > result
     if [ $? != 0 ];then
 	# timeout happened or pgproto returned non 0 status
 	echo "test failed in test case #2 (timeout)"

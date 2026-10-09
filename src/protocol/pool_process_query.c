@@ -1826,7 +1826,7 @@ do_error_execute_command(POOL_CONNECTION_POOL *backend, int node_id, int major)
 
 				}
 				memcpy(p, string, len);
-				p += sizeof(len);
+				p += len;
 			}
 		}
 		else
@@ -1847,7 +1847,7 @@ do_error_execute_command(POOL_CONNECTION_POOL *backend, int node_id, int major)
 							 errdetail("not enough space in buffer")));
 				}
 				memcpy(p, string, len);
-				p += sizeof(len);
+				p += len;
 			}
 		}
 	} while (kind != 'E');
@@ -2117,7 +2117,11 @@ do_query(POOL_CONNECTION *backend, char *query, POOL_SELECT_RESULT **result, int
 		if (backend->tstate == 'T')
 			pool_write(backend, "S", 1);	/* send "sync" message */
 		else
+		{
 			pool_write(backend, "H", 1);	/* send "flush" message */
+			/* remember that we sent queries but did not send sync message */
+			pool_get_session_context(true)->pending_sync_map[backend->db_node_id] = true;
+		}
 		len = htonl(sizeof(len));
 		pool_write_and_flush(backend, &len, sizeof(len));
 	}
@@ -3135,7 +3139,8 @@ static bool
 is_cache_empty(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend)
 {
 	/* Are we suspending reading from frontend? */
-	if (!pool_is_suspend_reading_from_frontend())
+	if (!pool_is_suspend_reading_from_frontend() &&
+		!pool_is_suspend_reading_from_frontend_copy_in())
 	{
 		/*
 		 * If SSL is enabled, we need to check SSL internal buffer is empty or
@@ -3359,6 +3364,15 @@ read_kind_from_backend(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 
 				ereport(DEBUG5,
 						(errmsg("read_kind_from_backend: sync pending message exists")));
+
+				/*
+				 * Responses from the node that received Sync have now been
+				 * consumed.  Send the deferred Sync to the primary before
+				 * collecting ReadyForQuery from all participating backends.
+				 */
+				if (pool_has_pipeline_state(
+						POOL_PIPELINE_PRIMARY_SYNC_DEFERRED))
+					forward_deferred_sync_to_primary(backend);
 				pool_unset_ignore_till_sync();
 				pool_pending_message_query_context_dest_set(msg, msg->query_context);
 				session_context->query_context = msg->query_context;
@@ -3402,9 +3416,9 @@ read_kind_from_backend(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 		read_kind_from_one_backend(frontend, backend, (char *) &kind, MAIN_NODE_ID);
 
 		/*
-		 * If we received a notification message in native replication mode,
-		 * other backends will not receive the message. So we should skip
-		 * other nodes otherwise we will hang in pool_read.
+		 * If we received a notification message in streaming replication
+		 * mode, other backends will not receive the message. So we should
+		 * skip other nodes. Otherwise we will hang in pool_read.
 		 */
 		if (kind == 'A')
 		{
@@ -3564,6 +3578,10 @@ read_kind_from_backend(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 				if (major == PROTO_MAJOR_V3)
 				{
 					pool_read(CONNECTION(backend, i), &len, sizeof(len));
+					if (ntohl(len) < sizeof(len))
+						ereport(ERROR,
+								(errmsg("read_kind_from_backend: ErrorResponse length %u is below the %zu-byte minimum",
+										ntohl(len), sizeof(len))));
 					unread_len = sizeof(len);
 					unread_p = palloc(ntohl(len));
 					memcpy(unread_p, &len, sizeof(len));
@@ -3867,22 +3885,30 @@ read_kind_from_backend(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 	/*
 	 * If we are in in streaming replication mode and we doing an extended
 	 * query, check the kind we just read.  If it's one of 'D' (data row), 'E'
-	 * (error), 'N' (notice), 'H' (CopyOutResponse), 'd' (CopyData) or 'c'
-	 * (CopyDone) and the head of the pending message queue was 'execute', the
-	 * message must not be pulled out so that next Command Complete message
-	 * from backend matches the execute message.
+	 * (error), 'N' (notice), 'G' (CopyInResponse), 'H' (CopyOutResponse), 'd'
+	 * (CopyData) or 'c' (CopyDone) and the head of the pending message queue
+	 * was 'execute', the message must not be pulled out so that next Command
+	 * Complete message from backend matches the execute message.
 	 *
 	 * Also if it's 't' (parameter description) and the pulled message was
 	 * 'describe', the message must not be pulled out so that the row
 	 * description message from backend matches the describe message.
+	 *
+	 * If an ErrorResponse is returned while processing Sync, the Sync
+	 * pending message must also be left in the queue.  This can happen when
+	 * a deferred constraint check fails while committing an implicit
+	 * transaction.  ErrorResponse processing uses the pending Sync message
+	 * to determine that Sync has already been received from the frontend.
 	 */
 	if (SL_MODE && pool_is_doing_extended_query_message() && msg)
 	{
 		if ((msg->type == POOL_EXECUTE &&
 			 (*decided_kind == 'D' || *decided_kind == 'E' ||
-			  *decided_kind == 'N' || *decided_kind == 'H' ||
+			  *decided_kind == 'N' ||
+			  *decided_kind == 'G' || *decided_kind == 'H' ||
 			  *decided_kind == 'd' || *decided_kind == 'c')) ||
-			(msg->type == POOL_DESCRIBE && *decided_kind == 't'))
+			(msg->type == POOL_DESCRIBE && *decided_kind == 't') ||
+			(msg->type == POOL_SYNC && *decided_kind == 'E'))
 		{
 			ereport(DEBUG5,
 					(errmsg("read_kind_from_backend: pending message was left")));
@@ -4183,6 +4209,7 @@ start_internal_transaction(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *back
 				/* Mark that we started new transaction */
 				INTERNAL_TRANSACTION_STARTED(backend, i) = true;
 				pool_unset_writing_transaction();
+				pool_unset_really_writing_transaction();
 			}
 		}
 	}

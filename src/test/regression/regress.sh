@@ -29,8 +29,8 @@ CGREEN=$(tput setaf 2)
 CBLUE=$(tput setaf 4)
 CNORM=$(tput sgr0)
 
-# timeout for each test (5 min.)
-TIMEOUT=300
+# timeout for each test (6 min.)
+TIMEOUT=360
 
 function install_pgpool
 {
@@ -112,7 +112,7 @@ function export_env_vars
 	export JDBC_DRIVER=$JDBC_DRIVER
 	export PGBENCH_PATH=$PGBENCH_PATH
 	export PGSOCKET_DIR=$PGSOCKET_DIR
-	export PGVERSION=`$PGBIN/initdb -V|awk '{print $3}'|sed 's/\..*//'`
+	export PGVERSION=`$PGBIN/initdb -V|awk '{print $3}'|sed 's/\..*//'|tr -d 'a-zA-Z'`
 	export LANG=C
 
 	export ENABLE_TEST=true

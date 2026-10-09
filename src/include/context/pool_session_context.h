@@ -125,6 +125,10 @@ typedef enum
 	POOL_SYNC
 } POOL_MESSAGE_TYPE;
 
+#define POOL_PIPELINE_PRIMARY_EXECUTED		(1U << 0)
+#define POOL_PIPELINE_STANDBY_EXECUTED		(1U << 1)
+#define POOL_PIPELINE_PRIMARY_SYNC_DEFERRED	(1U << 2)
+
 typedef struct
 {
 	POOL_MESSAGE_TYPE type;
@@ -198,6 +202,25 @@ typedef struct
 	bool		doing_extended_query_message;
 
 	/*
+	 * If true, an extended-query message has been received from the frontend
+	 * and the terminating frontend Sync message has not been received yet.
+	 */
+	bool		waiting_for_frontend_sync;
+
+	/*
+	 * True if a non-SELECT was executed in the current pipeline since
+	 * the previous frontend Sync.
+	 * This is used only in streaming replication mode.
+	 */
+	bool		pipeline_write_executed;
+
+	/*
+	 * Backend participation and deferred Sync state for the current
+	 * pipeline.
+	 */
+	unsigned char pipeline_state;
+
+	/*
 	 * If true, we have rewritten where_to_send map in the current query
 	 * context. pool_unset_query_in_progress() should restore the data from
 	 * where_to_send_save.  For now, this is only necessary while doing
@@ -209,8 +232,22 @@ typedef struct
 	/* If true, the command in progress has finished successfully. */
 	bool		command_success;
 
-	/* If true, write query has been appeared in this transaction */
+	/*
+	 * If true, write query has been appeared in this transaction.  Note that
+	 * the flag may not be turned off even if a transaction is started or
+	 * committed if disable_load_balance_on_write is other than "transaction".
+	 * Also if disable_load_balance_on_write is "dml_adaptive", the flag is
+	 * never be turned on.
+	 */
 	bool		writing_transaction;
+
+	/*
+	 * Unlike "writing_transaction", this flag is turned on whenever writing
+	 * query is issued in an explicit transaction, and is turned off when the
+	 * transaction is closed. Of course turned off when new transaction
+	 * starts. This flag is referenced by query cache.
+	 */
+	bool		really_writing_transaction;
 
 	/* If true, error occurred in this transaction */
 	bool		failed_transaction;
@@ -296,6 +333,13 @@ typedef struct
 	bool		suspend_reading_from_frontend;
 
 	/*
+	 * Do not read messages from frontend until COP-IN response ('G') received
+	 * from backend. Used in extended protocol + streaming replication.  This
+	 * flag is set when execute COPY FROM STDIN.
+	 */
+	bool		suspend_reading_from_frontend_copy_in;
+
+	/*
 	 * Temp tables list
 	 */
 	List	   *temp_tables;
@@ -306,6 +350,19 @@ typedef struct
 	 * Current transaction temp write list
 	 */
 	List	   *transaction_temp_write_list;
+
+	/*
+	 * For disable_load_balance_on_write = dml_adaptive_global: the table OIDs
+	 * written in the current explicit transaction, plus the database OID they
+	 * belong to.  Both are resolved at DML routing time (when the backend
+	 * connection is idle and do_query is safe) and consumed on COMMIT by
+	 * handle_query_context() to mark the tables as written in shared memory.
+	 * Resolving here -- rather than at COMMIT -- avoids issuing do_query
+	 * while the COMMIT response is still in flight, which would desync the
+	 * protocol and hang the session.
+	 */
+	List	   *transaction_temp_write_oid_list;
+	int			transaction_temp_write_dboid;
 
 #ifdef NOT_USED
 	/* Preferred "main" node id. Only used for SimpleForwardToFrontend. */
@@ -347,6 +404,11 @@ typedef struct
 	 * A map to send sync message. Each entry represents backend node.
 	 */
 	bool		sync_map[MAX_NUM_BACKENDS];
+
+	/*
+	 * Backend node id map do_query sent to, without sending a sync message.
+	 */
+	bool		pending_sync_map[MAX_NUM_BACKENDS];
 } POOL_SESSION_CONTEXT;
 
 extern void pool_init_session_context(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend);
@@ -362,6 +424,15 @@ extern void pool_unset_skip_reading_from_backends(void);
 extern bool pool_is_doing_extended_query_message(void);
 extern void pool_set_doing_extended_query_message(void);
 extern void pool_unset_doing_extended_query_message(void);
+extern bool pool_is_waiting_for_frontend_sync(void);
+extern void pool_set_waiting_for_frontend_sync(void);
+extern void pool_unset_waiting_for_frontend_sync(void);
+extern bool pool_is_pipeline_write_executed(void);
+extern void pool_set_pipeline_write_executed(void);
+extern void pool_unset_pipeline_write_executed(void);
+extern void pool_set_pipeline_state(unsigned char state);
+extern void pool_unset_pipeline_state(unsigned char state);
+extern bool pool_has_pipeline_state(unsigned char state);
 extern bool pool_is_ignore_till_sync(void);
 extern void pool_set_ignore_till_sync(void);
 extern void pool_unset_ignore_till_sync(void);
@@ -378,8 +449,11 @@ extern void pool_set_sent_message_state(POOL_SENT_MESSAGE *message);
 extern void pool_zap_query_context_in_sent_messages(POOL_QUERY_CONTEXT *query_context);
 extern POOL_SENT_MESSAGE *pool_get_sent_message_by_query_context(POOL_QUERY_CONTEXT *query_context);
 extern void pool_unset_writing_transaction(void);
+extern void pool_unset_really_writing_transaction(void);
 extern void pool_set_writing_transaction(void);
+extern void pool_set_really_writing_transaction(void);
 extern bool pool_is_writing_transaction(void);
+extern bool pool_is_really_writing_transaction(void);
 extern void pool_unset_failed_transaction(void);
 extern void pool_set_failed_transaction(void);
 extern bool pool_is_failed_transaction(void);
@@ -421,6 +495,10 @@ extern int	pool_get_minor_version(void);
 extern bool pool_is_suspend_reading_from_frontend(void);
 extern void pool_set_suspend_reading_from_frontend(void);
 extern void pool_unset_suspend_reading_from_frontend(void);
+
+extern bool pool_is_suspend_reading_from_frontend_copy_in(void);
+extern void pool_set_suspend_reading_from_frontend_copy_in(void);
+extern void pool_unset_suspend_reading_from_frontend_copy_in(void);
 
 extern void pool_temp_tables_init(void);
 extern void pool_temp_tables_destroy(void);

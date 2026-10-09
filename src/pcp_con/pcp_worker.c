@@ -4,7 +4,7 @@
  * pgpool: a language independent connection pool server for PostgreSQL
  * written by Tatsuo Ishii
  *
- * Copyright (c) 2003-2025	PgPool Global Development Group
+ * Copyright (c) 2003-2026	PgPool Global Development Group
  *
  * Permission to use, copy, modify, and distribute this software and
  * its documentation for any purpose and without fee is hereby
@@ -64,10 +64,13 @@
 extern char *pcp_conf_file;		/* global variable defined in main.c holds the
 								 * path for pcp.conf */
 volatile sig_atomic_t pcp_worker_wakeup_request = 0;
+static volatile sig_atomic_t pcp_worker_shutdown_request = 0;
+static volatile sig_atomic_t pcp_worker_shutdown_signal = 0;
 PCP_CONNECTION *volatile pcp_frontend = NULL;
 
 static RETSIGTYPE die(int sig);
 static RETSIGTYPE wakeup_handler_child(int sig);
+static void process_pcp_worker_shutdown_request(void);
 
 static void unset_nonblock(int fd);
 static int	user_authenticate(char *buf, char *passwd_file, char *salt, int salt_len);
@@ -122,15 +125,15 @@ pcp_worker_main(int port)
 	init_ps_display("", "", "", "");
 
 	/* set up signal handlers */
-	signal(SIGTERM, die);
-	signal(SIGINT, die);
-	signal(SIGQUIT, die);
-	signal(SIGCHLD, SIG_DFL);
-	signal(SIGUSR2, wakeup_handler_child);
-	signal(SIGUSR1, SIG_IGN);
-	signal(SIGHUP, SIG_IGN);
-	signal(SIGPIPE, SIG_IGN);
-	signal(SIGALRM, SIG_IGN);
+	pool_signal(SIGTERM, die);
+	pool_signal(SIGINT, die);
+	pool_signal(SIGQUIT, die);
+	pool_signal(SIGCHLD, SIG_DFL);
+	pool_signal(SIGUSR2, wakeup_handler_child);
+	pool_signal(SIGUSR1, SIG_IGN);
+	pool_signal(SIGHUP, SIG_IGN);
+	pool_signal(SIGPIPE, SIG_IGN);
+	pool_signal(SIGALRM, SIG_IGN);
 	/* Create per loop iteration memory context */
 	PCPMemoryContext = AllocSetContextCreate(TopMemoryContext,
 											 "PCP_worker_main_loop",
@@ -174,9 +177,15 @@ pcp_worker_main(int port)
 
 		errno = 0;
 
+		if (pcp_worker_shutdown_request)
+			process_pcp_worker_shutdown_request();
+
 		/* read a PCP packet */
 		do_pcp_read(pcp_frontend, &tos, 1);
 		do_pcp_read(pcp_frontend, &rsize, sizeof(int));
+
+		if (pcp_worker_shutdown_request)
+			process_pcp_worker_shutdown_request();
 
 		rsize = ntohl(rsize);
 
@@ -368,11 +377,37 @@ pcp_process_command(char tos, char *buf, int buf_len)
 	}
 }
 
+/*
+ * Signal handler for SIGTERM/SIGINT/SIGQUIT.  Async-signal-safe: only
+ * record the request; the main loop runs process_pcp_worker_shutdown_request()
+ * to log the event and exit cleanly.
+ */
 static RETSIGTYPE
 die(int sig)
 {
+	int			save_errno = errno;
+
+	pcp_worker_shutdown_signal = sig;
+	pcp_worker_shutdown_request = 1;
+	errno = save_errno;
+}
+
+/*
+ * Called from the main loop at safe points.  Acts on a pending SIGTERM,
+ * SIGINT or SIGQUIT recorded by die().  SIGTERM ("smart shutdown") only
+ * logs and lets the worker terminate when the client disconnects, matching
+ * the historical behaviour.  SIGINT/SIGQUIT trigger an immediate clean exit.
+ */
+static void
+process_pcp_worker_shutdown_request(void)
+{
+	int			sig = pcp_worker_shutdown_signal;
+
+	pcp_worker_shutdown_request = 0;
+
 	ereport(DEBUG1,
 			(errmsg("PCP worker child receives shutdown request signal %d", sig)));
+
 	if (sig == SIGTERM)
 	{
 		ereport(DEBUG1,
@@ -896,6 +931,8 @@ inform_node_info(PCP_CONNECTION *frontend, char *buf)
 			char		standby_delay_str[20];
 			char		standby_delay_by_time_str[4];
 			char		status_changed_time_str[20];
+			char		repl_state[NAMEDATALEN];
+			char		repl_sync_state[NAMEDATALEN];
 			char		code[] = "NodeInfo";
 			BackendInfo *bi = NULL;
 			SERVER_ROLE role;
@@ -909,6 +946,16 @@ inform_node_info(PCP_CONNECTION *frontend, char *buf)
 				ereport(ERROR,
 						(errmsg("informing node info failed"),
 						 errdetail("invalid node ID")));
+
+			/*
+			 * Snapshot the replication state strings, which the sr-check
+			 * worker rewrites lock-free in shared memory.  They are used for
+			 * both the packet length (wsize) and the payload below; reading
+			 * them live twice could make the length disagree with the bytes
+			 * written and desync the PCP stream, hanging the client.
+			 */
+			strlcpy(repl_state, bi->replication_state, sizeof(repl_state));
+			strlcpy(repl_sync_state, bi->replication_sync_state, sizeof(repl_sync_state));
 
 			snprintf(port_str, sizeof(port_str), "%d", bi->backend_port);
 			snprintf(status, sizeof(status), "%d", bi->backend_status);
@@ -949,8 +996,8 @@ inform_node_info(PCP_CONNECTION *frontend, char *buf)
 						  strlen(nodes[i].pg_role) + 1 +
 						  strlen(standby_delay_by_time_str) + 1 +
 						  strlen(standby_delay_str) + 1 +
-						  strlen(bi->replication_state) + 1 +
-						  strlen(bi->replication_sync_state) + 1 +
+						  strlen(repl_state) + 1 +
+						  strlen(repl_sync_state) + 1 +
 						  strlen(status_changed_time_str) + 1 +
 						  sizeof(int));
 			pcp_write(frontend, &wsize, sizeof(int));
@@ -965,8 +1012,8 @@ inform_node_info(PCP_CONNECTION *frontend, char *buf)
 			pcp_write(frontend, nodes[i].pg_role, strlen(nodes[i].pg_role) + 1);
 			pcp_write(frontend, standby_delay_by_time_str, strlen(standby_delay_by_time_str) + 1);
 			pcp_write(frontend, standby_delay_str, strlen(standby_delay_str) + 1);
-			pcp_write(frontend, bi->replication_state, strlen(bi->replication_state) + 1);
-			pcp_write(frontend, bi->replication_sync_state, strlen(bi->replication_sync_state) + 1);
+			pcp_write(frontend, repl_state, strlen(repl_state) + 1);
+			pcp_write(frontend, repl_sync_state, strlen(repl_sync_state) + 1);
 			pcp_write(frontend, status_changed_time_str, strlen(status_changed_time_str) + 1);
 			do_pcp_flush(frontend);
 		}

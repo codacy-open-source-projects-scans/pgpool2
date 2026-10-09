@@ -116,6 +116,8 @@ static POOL_QUERY_CONTEXT *create_dummy_query_context(void);
 
 static void add_sync_pending_message(void);
 
+static void handle_copy_in(POOL_QUERY_CONTEXT *query_context);
+
 /*
  * This is the workhorse of processing the pg_terminate_backend function to
  * make sure that the use of function should not trigger the backend node failover.
@@ -211,6 +213,9 @@ SimpleQuery(POOL_CONNECTION *frontend,
 	bool		error;
 	bool		use_minimal;
 
+	/* true if query is empty, white spaces or comments only */
+	bool		is_empty_query = false;
+
 /*
  * If query string is shorter than this, we do not run
  * multi_statement_query() to avoid its overhead.
@@ -267,7 +272,7 @@ SimpleQuery(POOL_CONNECTION *frontend,
 	 * query cache.
 	 */
 	if (pool_config->memory_cache_enabled && is_likely_select &&
-		!pool_is_writing_transaction() &&
+		!pool_is_really_writing_transaction() &&
 		TSTATE(backend, MAIN_REPLICA ? PRIMARY_NODE_ID : REAL_MAIN_NODE_ID) != 'E' &&
 		!query_cache_disabled())
 	{
@@ -349,6 +354,7 @@ SimpleQuery(POOL_CONNECTION *frontend,
 			 * [Pgpool-general] Confused about JDBC and load balancing
 			 */
 			parse_tree_list = get_dummy_read_query_tree();
+			is_empty_query = true;
 		}
 		else
 		{
@@ -407,10 +413,11 @@ SimpleQuery(POOL_CONNECTION *frontend,
 
 		/*
 		 * Check if the transaction is in abort status. If so, we do nothing
-		 * and just return an error message to frontend, execpt for
-		 * transaction COMMIT or ROLLBACK (TO) command.
+		 * and just return an error message to frontend, except for empty
+		 * queries, transaction COMMIT or ROLLBACK (TO) command.
 		 */
-		if (check_transaction_state_and_abort(contents, node, frontend, backend) == false)
+		if (!is_empty_query &&
+			!check_transaction_state_and_abort(contents, node, frontend, backend))
 		{
 			pool_ps_idle_display(backend);
 			pool_query_context_destroy(query_context);
@@ -1024,7 +1031,7 @@ Execute(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 	 * message has 0 row argument, we maybe able to use cache. If
 	 * partial_fetch is true, cannot use cache.
 	 */
-	if (pool_config->memory_cache_enabled && !pool_is_writing_transaction() &&
+	if (pool_config->memory_cache_enabled && !pool_is_really_writing_transaction() &&
 		(TSTATE(backend, MAIN_REPLICA ? PRIMARY_NODE_ID : REAL_MAIN_NODE_ID) != 'E')
 		&& pool_is_likely_select(query) && !query_cache_disabled() &&
 		(query_context->atEnd || num_rows == 0) &&
@@ -1236,6 +1243,27 @@ Execute(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 			pool_extended_send_and_wait(query_context, "E", len, contents, -1, MAIN_NODE_ID, true);
 		}
 
+		/*
+		 * In streaming replication mode, remember whether Execute was sent
+		 * to the primary or a standby in the current pipeline.
+		 */
+		if (pool_is_waiting_for_frontend_sync())
+		{
+			int			i;
+
+			for (i = 0; i < NUM_BACKENDS; i++)
+			{
+				if (!VALID_BACKEND(i) ||
+					!pool_is_node_to_be_sent(query_context, i))
+					continue;
+
+				if (i == PRIMARY_NODE_ID)
+					pool_set_pipeline_state(POOL_PIPELINE_PRIMARY_EXECUTED);
+				else
+					pool_set_pipeline_state(POOL_PIPELINE_STANDBY_EXECUTED);
+			}
+		}
+
 		/* Add pending message */
 		pmsg = pool_pending_message_create('E', len, contents);
 		pool_pending_message_dest_set(pmsg, query_context);
@@ -1271,11 +1299,30 @@ Execute(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 				if (!pool_is_transaction_read_only(node))
 				{
 					pool_set_writing_transaction();
+					if (TSTATE(backend, MAIN_REPLICA ? PRIMARY_NODE_ID : REAL_MAIN_NODE_ID) == 'T')
+						pool_set_really_writing_transaction();
 				}
 			}
 		}
+		/*
+		 * If the query was COPY FROM STDIN, set
+		 * suspend_reading_from_frontend_copy_in flag so that we do not
+		 * forward CopyData to backend until COPY-IN response comes from
+		 * backend.
+		 */
+		handle_copy_in(query_context);
+
 		pool_unset_query_in_progress();
 	}
+
+	/*
+	 * Remember a non-SELECT executed in the current pipeline so that a
+	 * subsequent SELECT can be sent to every backend.
+	 */
+	if (REPLICATION &&
+		pool_is_waiting_for_frontend_sync() &&
+		!is_select_query(node, query))
+		pool_set_pipeline_write_executed();
 
 	return POOL_CONTINUE;
 }
@@ -1299,9 +1346,18 @@ Parse(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 	POOL_QUERY_CONTEXT *query_context;
 
 	bool		error;
+	bool		is_waiting_for_frontend_sync;
 
 	/* Get session context */
 	session_context = pool_get_session_context(false);
+
+	/*
+	 * Save whether this Parse belongs to an extended-query cycle that was
+	 * already started by a preceding frontend message.  Mark the cycle as
+	 * started before processing this Parse.
+	 */
+	is_waiting_for_frontend_sync = pool_is_waiting_for_frontend_sync();
+	pool_set_waiting_for_frontend_sync();
 
 	/* Create query context */
 	query_context = pool_init_query_context();
@@ -1461,7 +1517,21 @@ Parse(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 		pool_where_to_send(query_context, query_context->original_query,
 						   query_context->parse_tree);
 
-		if (pool_config->disable_load_balance_on_write == DLBOW_DML_ADAPTIVE && strlen(name) != 0)
+		/*
+		 * Native replication and snapshot isolation process backend replies
+		 * synchronously.  Once a non-SELECT has executed in this pipeline,
+		 * send a following SELECT to every backend so that an error aborts the
+		 * implicit transaction on every node.
+		 */
+		if (REPLICATION &&
+			pool_is_pipeline_write_executed() &&
+			is_select_query(query_context->parse_tree,
+							query_context->original_query))
+			pool_setall_node_to_be_sent(query_context);
+
+		if (DLBOW_IS_DML_ADAPTIVE(
+								  pool_config->disable_load_balance_on_write)
+			&& strlen(name) != 0)
 			pool_setall_node_to_be_sent(query_context);
 
 		if (REPLICATION)
@@ -1529,7 +1599,8 @@ Parse(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 	{
 		char		kind;
 
-		if (TSTATE(backend, MAIN_NODE_ID) != 'T')
+		if (!is_waiting_for_frontend_sync &&
+			TSTATE(backend, MAIN_NODE_ID) != 'T')
 		{
 			int			i;
 
@@ -1593,7 +1664,11 @@ Parse(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 				pool_set_query_in_progress();
 		}
 
-		if (is_strict_query(query_context->parse_tree))
+		/*
+		 * As in Bind(), start an internal transaction only in replication
+		 * mode. In raw mode it would not be closed by ReadyForQuery().
+		 */
+		if (REPLICATION && is_strict_query(query_context->parse_tree))
 		{
 			start_internal_transaction(frontend, backend, query_context->parse_tree);
 			allow_close_transaction = 1;
@@ -1739,6 +1814,7 @@ Bind(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 		pool_set_ignore_till_sync();
 		pool_unset_query_in_progress();
 		pool_unset_suspend_reading_from_frontend();
+		pool_unset_suspend_reading_from_frontend_copy_in();
 		if (SL_MODE)
 			pool_discard_except_sync_and_ready_for_query(frontend, backend);
 
@@ -1804,7 +1880,7 @@ Bind(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 			return POOL_END;
 	}
 
-	if (pool_config->disable_load_balance_on_write == DLBOW_DML_ADAPTIVE &&
+	if (DLBOW_IS_DML_ADAPTIVE(pool_config->disable_load_balance_on_write) &&
 		TSTATE(backend, MAIN_REPLICA ? PRIMARY_NODE_ID : REAL_MAIN_NODE_ID) == 'T')
 	{
 		pool_where_to_send(query_context, query_context->original_query,
@@ -2149,6 +2225,64 @@ FunctionCall3(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend,
 }
 
 /*
+ * Send Sync to all valid backends except the primary.
+ *
+ * The primary may contain an uncommitted command from the current implicit
+ * transaction. Its Sync is deferred until the result from the standby is
+ * known.
+ */
+static POOL_STATUS
+forward_sync_except_primary(POOL_CONNECTION_POOL *backend)
+{
+	char		kind = 'S';
+	int			sendlen;
+	int			i;
+
+	sendlen = htonl(sizeof(int));
+
+	for (i = 0; i < NUM_BACKENDS; i++)
+	{
+		if (!VALID_BACKEND(i) || i == PRIMARY_NODE_ID)
+			continue;
+
+		pool_write(CONNECTION(backend, i), &kind, sizeof(kind));
+		pool_write_and_flush(CONNECTION(backend, i),
+							 &sendlen, sizeof(sendlen));
+	}
+
+	return POOL_CONTINUE;
+}
+
+/*
+ * Send a previously deferred frontend Sync to the primary.
+ */
+void
+forward_deferred_sync_to_primary(POOL_CONNECTION_POOL *backend)
+{
+	char		kind = 'S';
+	int			sendlen;
+
+	if (!pool_has_pipeline_state(POOL_PIPELINE_PRIMARY_SYNC_DEFERRED))
+		return;
+
+	sendlen = htonl(sizeof(int));
+
+	if (VALID_BACKEND(PRIMARY_NODE_ID))
+	{
+		ereport(DEBUG1,
+				(errmsg("sending deferred Sync to primary node %d",
+						PRIMARY_NODE_ID)));
+
+		pool_write(CONNECTION(backend, PRIMARY_NODE_ID),
+				   &kind, sizeof(kind));
+		pool_write_and_flush(CONNECTION(backend, PRIMARY_NODE_ID),
+							 &sendlen, sizeof(sendlen));
+	}
+
+	pool_unset_pipeline_state(POOL_PIPELINE_PRIMARY_SYNC_DEFERRED);
+}
+
+/*
  * Process ReadyForQuery('Z') message.
  * If send_ready is true, send 'Z' message to frontend.
  * If cache_commit is true, commit or discard query cache according to
@@ -2299,7 +2433,10 @@ ReadyForQuery(POOL_CONNECTION *frontend,
 	 * transaction.
 	 */
 	/* if (pool_is_query_in_progress() && allow_close_transaction) */
-	if (REPLICATION && allow_close_transaction)
+	if (REPLICATION &&
+		(allow_close_transaction ||
+		 (pool_config->backend_clustering_mode == CM_SNAPSHOT_ISOLATION &&
+		  pool_is_pipeline_write_executed())))
 	{
 		bool		internal_transaction_started = INTERNAL_TRANSACTION_STARTED(backend, MAIN_NODE_ID);
 
@@ -2408,7 +2545,22 @@ ReadyForQuery(POOL_CONNECTION *frontend,
 			pool_write(frontend, &state, 1);
 		}
 		pool_flush(frontend);
+
+		/*
+		 * Clear the non-SELECT execution state recorded for the
+		 * completed pipeline.
+		 */
+		pool_unset_pipeline_write_executed();
 	}
+
+	/*
+	 * Clear the backend execution state recorded for the completed
+	 * pipeline in streaming replication mode.
+	 */
+	if (SL_MODE)
+		pool_unset_pipeline_state(POOL_PIPELINE_PRIMARY_EXECUTED |
+								  POOL_PIPELINE_STANDBY_EXECUTED);
+
 
 	if (pool_is_query_in_progress())
 	{
@@ -2751,8 +2903,16 @@ ErrorResponse3(POOL_CONNECTION *frontend,
 	if (ret != POOL_CONTINUE)
 		return ret;
 
-	if (!SL_MODE)
+	if (!SL_MODE || pool_has_pipeline_state(POOL_PIPELINE_PRIMARY_EXECUTED))
 		raise_intentional_error_if_need(backend);
+
+	/*
+	 * If the error came from a standby, raise_intentional_error_if_need()
+	 * has now placed the primary in the aborted state. Send the deferred
+	 * Sync so that the primary rolls back the implicit transaction.
+	 */
+	if (pool_has_pipeline_state(POOL_PIPELINE_PRIMARY_SYNC_DEFERRED))
+		forward_deferred_sync_to_primary(backend);
 
 	return POOL_CONTINUE;
 }
@@ -2870,7 +3030,8 @@ ProcessFrontendResponse(POOL_CONNECTION *frontend,
 		return POOL_CONTINUE;
 
 	/* Are we suspending reading from frontend? */
-	if (pool_is_suspend_reading_from_frontend())
+	if (pool_is_suspend_reading_from_frontend() ||
+		pool_is_suspend_reading_from_frontend_copy_in())
 		return POOL_CONTINUE;
 
 	pool_read(frontend, &fkind, 1);
@@ -2944,6 +3105,7 @@ ProcessFrontendResponse(POOL_CONNECTION *frontend,
 			POOL_QUERY_CONTEXT *query_context;
 			char	   *query;
 			Node	   *node;
+			bool		defer_primary_sync;
 
 		case 'X':				/* Terminate */
 			if (contents)
@@ -2968,6 +3130,7 @@ ProcessFrontendResponse(POOL_CONNECTION *frontend,
 		case 'E':				/* Execute */
 			allow_close_transaction = 1;
 			pool_set_doing_extended_query_message();
+			pool_set_waiting_for_frontend_sync();
 			if (!pool_is_query_in_progress() && !pool_is_ignore_till_sync())
 				pool_set_query_in_progress();
 			status = Execute(frontend, backend, len, contents);
@@ -2981,11 +3144,13 @@ ProcessFrontendResponse(POOL_CONNECTION *frontend,
 
 		case 'B':				/* Bind */
 			pool_set_doing_extended_query_message();
+			pool_set_waiting_for_frontend_sync();
 			status = Bind(frontend, backend, len, contents);
 			break;
 
 		case 'C':				/* Close */
 			pool_set_doing_extended_query_message();
+			pool_set_waiting_for_frontend_sync();
 			if (!pool_is_query_in_progress() && !pool_is_ignore_till_sync())
 				pool_set_query_in_progress();
 			status = Close(frontend, backend, len, contents);
@@ -2993,6 +3158,7 @@ ProcessFrontendResponse(POOL_CONNECTION *frontend,
 
 		case 'D':				/* Describe */
 			pool_set_doing_extended_query_message();
+			pool_set_waiting_for_frontend_sync();
 			status = Describe(frontend, backend, len, contents);
 			break;
 
@@ -3000,6 +3166,10 @@ ProcessFrontendResponse(POOL_CONNECTION *frontend,
 			if (pool_config->log_client_messages)
 				ereport(LOG,
 						(errmsg("Sync message from frontend.")));
+			defer_primary_sync = SL_MODE &&
+								 pool_has_pipeline_state(POOL_PIPELINE_PRIMARY_EXECUTED |
+														 POOL_PIPELINE_STANDBY_EXECUTED);
+			pool_unset_waiting_for_frontend_sync();
 			pool_set_doing_extended_query_message();
 			if (pool_is_ignore_till_sync())
 				pool_unset_ignore_till_sync();
@@ -3017,7 +3187,21 @@ ProcessFrontendResponse(POOL_CONNECTION *frontend,
 			}
 			else if (!pool_is_query_in_progress())
 				pool_set_query_in_progress();
-			status = SimpleForwardToBackend(fkind, frontend, backend, len, contents);
+			if (defer_primary_sync)
+			{
+				ereport(DEBUG1,
+						(errmsg("deferring Sync to primary node %d",
+								PRIMARY_NODE_ID)));
+
+				pool_set_pipeline_state(POOL_PIPELINE_PRIMARY_SYNC_DEFERRED);
+
+				status = forward_sync_except_primary(backend);
+			}
+			else
+			{
+				status = SimpleForwardToBackend(fkind, frontend,
+												backend, len, contents);
+			}
 
 			if (SL_MODE)
 			{
@@ -3182,6 +3366,7 @@ ProcessBackendResponse(POOL_CONNECTION *frontend,
 						(errmsg("processing backend response"),
 						 errdetail("Ready For Query received")));
 				pool_unset_suspend_reading_from_frontend();
+				pool_unset_suspend_reading_from_frontend_copy_in();
 				status = ReadyForQuery(frontend, backend, true, true);
 #ifdef DEBUG
 				extern bool stop_now;
@@ -3498,6 +3683,8 @@ CopyDataRows(POOL_CONNECTION *frontend,
 				char		kind;
 				char	   *contents = NULL;
 
+				pool_unset_suspend_reading_from_frontend_copy_in();
+
 				pool_read(frontend, &kind, 1);
 
 				ereport(DEBUG5,
@@ -3616,6 +3803,17 @@ CopyDataRows(POOL_CONNECTION *frontend,
 	 */
 	if (copyin)
 	{
+		/*
+		 * If we are in extended query protocol, unset query in progress so
+		 * that pool_process_query() main loop read a message from frontend.
+		 * If it's a sync message, it will be forwarded to backend and it
+		 * responds with CommandComplete and ReadyforQuery.
+		 */
+		if (pool_is_doing_extended_query_message())
+		{
+			pool_unset_query_in_progress();
+			return POOL_CONTINUE;
+		}
 		for (i = 0; i < NUM_BACKENDS; i++)
 		{
 			if (VALID_BACKEND(i))
@@ -3661,7 +3859,8 @@ raise_intentional_error_if_need(POOL_CONNECTION_POOL *backend)
 	query_context = session_context->query_context;
 
 	if (MAIN_REPLICA &&
-		TSTATE(backend, PRIMARY_NODE_ID) == 'T' &&
+		(TSTATE(backend, PRIMARY_NODE_ID) == 'T' ||
+		 pool_has_pipeline_state(POOL_PIPELINE_PRIMARY_EXECUTED)) &&
 		PRIMARY_NODE_ID != MAIN_NODE_ID &&
 		query_context &&
 		is_select_query(query_context->parse_tree, query_context->original_query))
@@ -4528,7 +4727,8 @@ flatten_set_variable_args(const char *name, List *args)
 }
 
 #ifdef NOT_USED
-/* Called when sync message is received.
+/*
+ * Called when sync message is received.
  * Wait till ready for query received.
  */
 static void
@@ -4739,7 +4939,7 @@ pool_at_command_success(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend
 	{
 		if (pool_config->disable_load_balance_on_write != DLBOW_TRANS_TRANSACTION)
 			pool_unset_writing_transaction();
-
+		pool_unset_really_writing_transaction();
 		pool_unset_failed_transaction();
 		pool_unset_transaction_isolation();
 	}
@@ -4753,7 +4953,7 @@ pool_at_command_success(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend
 	{
 		if (pool_config->disable_load_balance_on_write != DLBOW_TRANS_TRANSACTION)
 			pool_unset_writing_transaction();
-
+		pool_unset_really_writing_transaction();
 		pool_unset_failed_transaction();
 		pool_unset_transaction_isolation();
 	}
@@ -4798,6 +4998,13 @@ pool_at_command_success(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend
 						(errmsg("not SET TRANSACTION READ ONLY")));
 
 				pool_set_writing_transaction();
+
+				/*
+				 * In case in transaction, we need to
+				 * really_writing_transaction so that query cache is disabled.
+				 */
+				if (TSTATE(backend, MAIN_REPLICA ? PRIMARY_NODE_ID : REAL_MAIN_NODE_ID) == 'T')
+					pool_set_really_writing_transaction();
 			}
 		}
 
@@ -5112,24 +5319,17 @@ si_get_snapshot(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backend, Node *
 }
 
 /*
- * Check if the transaction is in abort status ('E' status).  If not, do thing
- * and return true. Otherwise, check if the transaction is already in failed
- * status using pool_is_failed_transaction().  If so and the processing query
- * is not a commit or rollback command, send a ready for query message to
- * frontend along with "current transaction is aborted..."  message to let the
- * client know the current transaction is in abort status.
+ * Check if the transaction is already in failed status using
+ * pool_is_failed_transaction().  If so and the processing query is not a
+ * commit or rollback command, send a ready for query message to frontend
+ * along with "current transaction is aborted..."  message to let the client
+ * know the current transaction is in abort status.
  */
 static bool
 check_transaction_state_and_abort(char *query, Node *node, POOL_CONNECTION *frontend,
 								  POOL_CONNECTION_POOL *backend)
 {
-	int			len;
-
-	/* chekc if the transaction state is 'E'. If not, do nothing */
-	if (TSTATE(backend, MAIN_NODE_ID) != 'E')
-		return true;
-
-	/* If frontend is NULL, do nothing */
+	/* If frontend is NULL (reset query case), do nothing */
 	if (frontend == NULL)
 		return true;
 
@@ -5140,6 +5340,7 @@ check_transaction_state_and_abort(char *query, Node *node, POOL_CONNECTION *fron
 	if (pool_is_failed_transaction() && !is_commit_or_rollback_query(node))
 	{
 		StringInfoData buf;
+		int			len;
 
 		initStringInfo(&buf);
 		appendStringInfo(&buf, "statement: %s", query);
@@ -5362,6 +5563,21 @@ add_sync_pending_message(void)
 	if (i == NUM_BACKENDS)
 		memset(session_context->sync_map, true, NUM_BACKENDS);
 
+	/*
+	 * Check if do_query sent queries but have not send sync message yet.  If
+	 * so, set the node id to sync_map so that a sync message is sent to the
+	 * node.  Otherwise, the transaction keeps open, which cause subsequent
+	 * queries might fail: i.e. DISCARD ALL in reset_query_list.
+	 */
+	for (i = 0; i < NUM_BACKENDS; i++)
+	{
+		if (session_context->pending_sync_map[i])
+		{
+			session_context->sync_map[i] = true;
+			session_context->pending_sync_map[i] = false;
+		}
+	}
+
 	/* copy sync map to query context's where_to_send map */
 	memcpy(query_context->where_to_send, session_context->sync_map,
 		   sizeof(query_context->where_to_send));
@@ -5387,4 +5603,35 @@ add_sync_pending_message(void)
 		appendStringInfo(&buf, "%d ", pool_get_session_context(false)->sync_map[i]);
 	elog(DEBUG5, "%s", buf.data);
 	pfree(buf.data);
+}
+
+/*
+ * Process "COPY IN" in extended query protocol
+ *
+ * If query is "COPY FROM STDIN", set suspend_reading_from_frontend_copy_in
+ * flag. We want to accept CopyDataRaw from frontend after receiving COPY-IN
+ * response from backend.
+ *
+ * This function should be called in streaming replication mode.
+ */
+static void
+handle_copy_in(POOL_QUERY_CONTEXT *query_context)
+{
+	Node		*node = query_context->parse_tree;
+	CopyStmt	*cst;
+
+	if (!node)
+		return;
+	if (!IsA(node, CopyStmt))
+		return;
+
+	cst = (CopyStmt *) node;
+	if (!cst->is_from || cst->filename != NULL)
+		return;
+
+	/*
+	 * Ok, the query is COPY FROM STDIN.
+	 * Set suspend_reading_from_frontend_copy_in flag,
+	 */
+	pool_set_suspend_reading_from_frontend_copy_in();
 }

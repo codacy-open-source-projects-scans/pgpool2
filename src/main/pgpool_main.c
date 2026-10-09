@@ -57,6 +57,7 @@
 #include "auth/pool_passwd.h"
 #include "auth/pool_hba.h"
 #include "query_cache/pool_memqcache.h"
+#include "utils/pool_track_table_mutation.h"
 #include "watchdog/wd_internal_commands.h"
 #include "watchdog/wd_lifecheck.h"
 #include "watchdog/watchdog.h"
@@ -171,6 +172,7 @@ static void kill_all_children(int sig);
 static pid_t fork_follow_child(int old_main_node, int new_primary, int old_primary);
 static int	read_status_file(bool discard_status);
 static RETSIGTYPE exit_handler(int sig);
+static void do_shutdown(int sig);
 static RETSIGTYPE reap_handler(int sig);
 static RETSIGTYPE sigusr1_handler(int sig);
 static void sigusr1_interrupt_processor(void);
@@ -253,6 +255,12 @@ volatile sig_atomic_t reload_config_request = 0;
 static volatile sig_atomic_t sigusr1_request = 0;
 static volatile sig_atomic_t sigchld_request = 0;
 static volatile sig_atomic_t wakeup_request = 0;
+static volatile sig_atomic_t main_exit_request = 0;	/* set by exit_handler;
+												 * carries the captured signal
+												 * number (SIGTERM/INT/QUIT)
+												 * so the main loop can
+												 * perform the (non-async-safe)
+												 * shutdown work itself. */
 
 static int	pipe_fds[2];		/* for delivering signals */
 
@@ -269,7 +277,9 @@ static pid_t pgpool_logger_pid = 0; /* pid for pgpool_logger process */
 static pid_t wd_lifecheck_pid = 0;	/* pid for child process handling watchdog
 									 * lifecheck */
 
-BACKEND_STATUS *my_backend_status[MAX_NUM_BACKENDS];	/* Backend status buffer */
+/* Backend status buffer */
+volatile BACKEND_STATUS *my_backend_status[MAX_NUM_BACKENDS];
+
 int			my_main_node_id;	/* Main node id buffer */
 
 /*
@@ -707,6 +717,13 @@ PgpoolMain(bool discard_status, bool clear_memcache_oidmaps)
 			POOL_SETMASK(&UnBlockSig);
 			r = pool_pause(&t);
 			POOL_SETMASK(&BlockSig);
+
+			/*
+			 * If a SIGTERM/SIGINT/SIGQUIT was queued by exit_handler,
+			 * service it immediately rather than waiting another tick.
+			 */
+			if (main_exit_request)
+				do_shutdown(main_exit_request);
 
 			if (pool_config->process_management == PM_DYNAMIC)
 				service_child_processes();
@@ -1290,12 +1307,87 @@ terminate_all_childrens(int sig)
 
 
 /*
- * Pgpool main process exit handler
+ * Pgpool main process exit handler.
+ *
+ * This handler runs in async-signal context: it MUST only call
+ * async-signal-safe primitives (POSIX 2024 2.4.3).  ereport(),
+ * pool_semaphore_lock(), MemoryContext operations, blocking waitpid()
+ * and exit(3) (atexit chain + stdio flush) are all unsafe here.  In a
+ * previous version this body did the full shutdown inline, which could
+ * deadlock or corrupt heap state when SIGTERM/SIGINT/SIGQUIT arrived
+ * while PT_MAIN was inside ereport(), palloc(), or another semop.
+ *
+ * The handler now only records the requested signal number into a
+ * sig_atomic_t flag and writes one byte to the self-pipe so the main
+ * loop's select() returns.  The actual shutdown is performed
+ * synchronously by do_shutdown() from the main loop, where calling
+ * non-async-safe code is permitted.
+ *
+ * If the same signal is delivered to a forked child that has not yet
+ * reset this handler, fall through to proc_exit() unchanged.
  */
 static RETSIGTYPE exit_handler(int sig)
 {
-	int		   *walk;
 	int			save_errno = errno;
+
+	/*
+	 * this could happen in a child process if a signal has been sent before
+	 * resetting signal handler.  proc_exit() ultimately reduces to _exit()
+	 * for non-PT_MAIN processes; calling it from a handler in a child that
+	 * hasn't yet rewired its own handlers is the historical behaviour.
+	 */
+	if (getpid() != mypid)
+	{
+		proc_exit(0);
+		errno = save_errno;
+		return;
+	}
+
+	if (sig != SIGTERM && sig != SIGINT && sig != SIGQUIT)
+	{
+		errno = save_errno;
+		return;
+	}
+
+	/*
+	 * Record the signal for the main loop.  Repeated signals coalesce; the
+	 * first one wins, which matches the previous "exiting" guard.
+	 */
+	if (main_exit_request == 0)
+		main_exit_request = sig;
+
+	/* Wake up the main loop if the self-pipe is set up. */
+	if (pipe_fds[1])
+	{
+		/*
+		 * write() is async-signal-safe.  We deliberately ignore the
+		 * return value: if the pipe is full the main loop will pick the
+		 * flag up on its next select() wake-up anyway.
+		 *
+		 * We do not use "(void) write()" here because it warns "warning:
+		 * ignoring return value of write declared with attribute
+		 * warn_unused_result [-Wunused-result] on gcc -O2 -Wall and some
+		 * platforms enabling _FORTIFY_SOURCE.
+		 */
+		ssize_t		w = write(pipe_fds[1], "\0", 1);
+
+		(void) w;
+	}
+
+	errno = save_errno;
+}
+
+/*
+ * Synchronous shutdown body, invoked from the PT_MAIN main loop when
+ * main_exit_request has been set by exit_handler().  All the work that used
+ * to live inside the signal handler (ereport, pool_semaphore_lock,
+ * waitpid, kill of child group, exit(3)) lives here, in normal context
+ * where it is safe.
+ */
+static void
+do_shutdown(int sig)
+{
+	int		   *walk;
 
 	ereport(LOG,
 			(errmsg("exit handler called (signal: %d)", sig)));
@@ -1303,35 +1395,16 @@ static RETSIGTYPE exit_handler(int sig)
 	POOL_SETMASK(&AuthBlockSig);
 
 	/*
-	 * this could happen in a child process if a signal has been sent before
-	 * resetting signal handler
-	 */
-	if (getpid() != mypid)
-	{
-		POOL_SETMASK(&UnBlockSig);
-		proc_exit(0);
-	}
-
-	if (sig != SIGTERM && sig != SIGINT && sig != SIGQUIT)
-	{
-		POOL_SETMASK(&UnBlockSig);
-		errno = save_errno;
-		return;
-	}
-
-	/*
-	 * Check if another exit handler instance is already running.  It is
-	 * possible that exit_handler is interrupted in the middle by other
-	 * signal.
+	 * Check if another exit handler instance is already running.  Since the
+	 * shutdown now runs serially from the main loop this is mostly a
+	 * belt-and-braces guard, but cheap and harmless to keep.
 	 */
 	if (exiting)
 	{
 		POOL_SETMASK(&UnBlockSig);
-		errno = save_errno;
 		return;
 	}
 
-	/* Check to make sure that other exit handler is not running */
 	pool_semaphore_lock(MAIN_EXIT_HANDLER_SEM);
 	if (exiting == 0)
 	{
@@ -1344,7 +1417,6 @@ static RETSIGTYPE exit_handler(int sig)
 		ereport(LOG,
 				(errmsg("exit handler (signal: %d) called. but exit handler is already in progress", sig)));
 		POOL_SETMASK(&UnBlockSig);
-		errno = save_errno;
 		return;
 	}
 
@@ -1501,11 +1573,14 @@ sigusr1_interrupt_processor(void)
 
 	if (user1SignalSlot->signalFlags[SIG_WATCHDOG_STATE_CHANGED])
 	{
+		WD_STATES	wd_state;
+
 		ereport(LOG,
 				(errmsg("Pgpool-II parent process received watchdog state change signal from watchdog")));
 
 		user1SignalSlot->signalFlags[SIG_WATCHDOG_STATE_CHANGED] = false;
-		if (wd_internal_get_watchdog_local_node_state() == WD_STANDBY)
+		wd_state = wd_internal_get_watchdog_local_node_state();
+		if (wd_state == WD_STANDBY)
 		{
 			ereport(LOG,
 					(errmsg("we have joined the watchdog cluster as STANDBY node"),
@@ -1518,6 +1593,12 @@ sigusr1_interrupt_processor(void)
 			 * would lead to forever stuck in the the locked state
 			 */
 			pool_release_follow_primary_lock(true);
+		}
+		else if (wd_state == WD_COORDINATOR &&
+				 pool_config->disable_load_balance_on_write ==
+				 DLBOW_DML_ADAPTIVE_GLOBAL)
+		{
+			pool_track_table_mutation_trigger_global_cold_start();
 		}
 	}
 	if (user1SignalSlot->signalFlags[SIG_FAILOVER_INTERRUPT])
@@ -3084,6 +3165,16 @@ initialize_shared_mem_objects(bool clear_memcache_oidmaps)
 		elog(DEBUG1, "watchdog: %zu bytes requested for shared memory", MAXALIGN(wd_ipc_get_shared_mem_size()));
 	}
 
+	if (pool_config->disable_load_balance_on_write ==
+		DLBOW_DML_ADAPTIVE_GLOBAL)
+	{
+		size += MAXALIGN(pool_track_table_mutation_shmem_size());
+		elog(DEBUG1,
+			 "track_table_mutation: %zu bytes requested"
+			 " for shared memory",
+			 MAXALIGN(pool_track_table_mutation_shmem_size()));
+	}
+
 	initialize_shared_memory_main_segment(size);
 
 	/* Move the backend descriptors to shared memory */
@@ -3131,7 +3222,8 @@ initialize_shared_mem_objects(bool clear_memcache_oidmaps)
 
 	for (i = 0; i < MAX_NUM_BACKENDS; i++)
 	{
-		my_backend_status[i] = &(BACKEND_INFO(i).backend_status);
+		my_backend_status[i] =
+			(volatile BACKEND_STATUS *) &(BACKEND_INFO(i).backend_status);
 	}
 
 	/* initialize Req_info */
@@ -3202,6 +3294,13 @@ initialize_shared_mem_objects(bool clear_memcache_oidmaps)
 
 	/* initialize pcp worker child pids */
 	memset(Req_info->pcp_worker_pids, 0, sizeof(Req_info->pcp_worker_pids));
+
+	/* Initialize track table mutation for recently written tables */
+	if (pool_config->disable_load_balance_on_write ==
+		DLBOW_DML_ADAPTIVE_GLOBAL)
+	{
+		pool_track_table_mutation_init();
+	}
 }
 
 /*
@@ -3687,7 +3786,8 @@ sync_backend_from_watchdog(void)
 			{
 				BACKEND_INFO(i).backend_status = CON_DOWN;
 				pool_set_backend_status_changed_time(i);
-				my_backend_status[i] = &(BACKEND_INFO(i).backend_status);
+				my_backend_status[i] =
+					(volatile BACKEND_STATUS *) &(BACKEND_INFO(i).backend_status);
 				reload_master_node_id = true;
 				node_status_was_changed_to_down = true;
 				ereport(LOG,
@@ -3706,7 +3806,8 @@ sync_backend_from_watchdog(void)
 
 				BACKEND_INFO(i).backend_status = CON_CONNECT_WAIT;
 				pool_set_backend_status_changed_time(i);
-				my_backend_status[i] = &(BACKEND_INFO(i).backend_status);
+				my_backend_status[i] =
+					(volatile BACKEND_STATUS *) &(BACKEND_INFO(i).backend_status);
 				reload_master_node_id = true;
 
 				ereport(LOG,
@@ -3748,6 +3849,27 @@ sync_backend_from_watchdog(void)
 					(errmsg("primary node:%d on leader watchdog node \"%s\" seems to be quarantined",
 							Req_info->primary_node_id, backendStatus->nodeName),
 					 errdetail("keeping the current primary")));
+		}
+		else if (Req_info->primary_node_id >= 0 &&
+				 backendStatus->primary_node_id == -2)
+		{
+			/*
+			 * Leader watchdog is still initialising and has not yet run
+			 * find_primary_node_repeatedly(); its primary_node_id is still
+			 * the initial sentinel -2. Do not overwrite our locally-determined
+			 * primary with the leader's stale initial state.
+			 *
+			 * Without this guard, a simultaneous restart of all pgpool nodes
+			 * leaves every STANDBY watchdog with primary_node_id = -2 forever:
+			 * sync_backend_from_watchdog() is only re-invoked on
+			 * SIG_BACKEND_SYNC_REQUIRED (raised from WD_FAILOVER_END), so
+			 * there is no normal path that resyncs once the leader's own
+			 * find_primary_node_repeatedly() completes.
+			 */
+			ereport(LOG,
+					(errmsg("primary node on leader watchdog node \"%s\" is still in the initial state",
+							backendStatus->nodeName),
+					 errdetail("keeping the locally-detected primary node:%d", Req_info->primary_node_id)));
 		}
 		else
 		{
@@ -5009,6 +5131,16 @@ void
 check_requests(void)
 {
 	sigset_t	sig;
+
+	/*
+	 * Shutdown request?  exit_handler() set main_exit_request to the captured
+	 * signal number; perform the actual (non-async-safe) shutdown here, in
+	 * normal context.  do_shutdown() does not return.
+	 */
+	if (main_exit_request)
+	{
+		do_shutdown(main_exit_request);
+	}
 
 	/*
 	 * Waking child request?

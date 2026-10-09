@@ -75,6 +75,8 @@ static int	num_all_parameters = 0;
 static void initialize_variables_with_default(struct config_generic *gconf);
 static bool config_enum_lookup_by_name(struct config_enum *record, const char *value, int *retval);
 
+static bool parameter_exists(ConfigVariable *head, const char *name);
+void reset_removed_parameters(ConfigVariable *head, ConfigContext context);
 static void build_variable_groups(void);
 static void build_config_variables(void);
 static void initialize_config_gen(struct config_generic *gen);
@@ -290,6 +292,7 @@ static const struct config_enum_entry disable_load_balance_on_write_options[] = 
 	{"trans_transaction", DLBOW_TRANS_TRANSACTION, false},
 	{"always", DLBOW_ALWAYS, false},
 	{"dml_adaptive", DLBOW_DML_ADAPTIVE, false},
+	{"dml_adaptive_global", DLBOW_DML_ADAPTIVE_GLOBAL, false},
 	{NULL, 0, false}
 };
 
@@ -1777,6 +1780,19 @@ static struct config_int_array ConfigureNamesIntArray[] =
 
 static struct config_double ConfigureNamesDouble[] =
 {
+	{
+		{"track_table_mutation_ttl_factor",
+			CFGCXT_RELOAD, LOAD_BALANCE_CONFIG,
+			"TTL multiplier for track table mutation "
+			"(TTL = replication_delay * factor)",
+			CONFIG_VAR_TYPE_DOUBLE, false, 0
+		},
+		&g_pool_config.track_table_mutation_ttl_factor,
+		5.0,					/* boot value: 5x replication delay */
+		1.0, 100.0,				/* min, max */
+		NULL, NULL, NULL
+	},
+
 	/* End-of-list marker */
 	EMPTY_CONFIG_DOUBLE
 };
@@ -2394,6 +2410,57 @@ static struct config_int ConfigureNamesInt[] =
 		&g_pool_config.replication_delay_source_timeout,
 		10,
 		1, 3600,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"track_table_mutation_max_staleness",
+			CFGCXT_RELOAD, LOAD_BALANCE_CONFIG,
+			"Maximum duration in milliseconds that a "
+			"table can be marked stale from its first "
+			"write. 0 disables the cap.",
+			CONFIG_VAR_TYPE_INT, false, GUC_UNIT_MS
+		},
+		&g_pool_config.track_table_mutation_max_staleness,
+		60000,					/* 60 seconds */
+		0, 3600000,				/* 0 to 1 hour */
+		NULL, NULL, NULL
+	},
+
+	{
+		{"track_table_mutation_cold_start_duration",
+			CFGCXT_RELOAD, LOAD_BALANCE_CONFIG,
+			"Duration in milliseconds to force queries "
+			"to primary after child process starts.",
+			CONFIG_VAR_TYPE_INT, false, GUC_UNIT_MS
+		},
+		&g_pool_config.track_table_mutation_cold_start_duration,
+		2000,					/* 2 seconds */
+		0, 60000,				/* 0 to 60 seconds */
+		NULL, NULL, NULL
+	},
+
+	{
+		{"track_table_mutation_table_buckets",
+			CFGCXT_INIT, LOAD_BALANCE_CONFIG,
+			"Number of hash buckets for track table mutation.",
+			CONFIG_VAR_TYPE_INT, false, 0
+		},
+		&g_pool_config.track_table_mutation_table_buckets,
+		1024,
+		64, 65536,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"track_table_mutation_table_size",
+			CFGCXT_INIT, LOAD_BALANCE_CONFIG,
+			"Maximum number of entries in track table mutation.",
+			CONFIG_VAR_TYPE_INT, false, 0
+		},
+		&g_pool_config.track_table_mutation_table_size,
+		2048,
+		128, 131072,
 		NULL, NULL, NULL
 	},
 
@@ -3154,6 +3221,136 @@ initialize_variables_with_default(struct config_generic *gconf)
 				break;
 			}
 
+	}
+}
+
+/*
+ * Check if a configuration parameter with the given name exists in the
+ * provided linked list.
+ *
+ * head is the pointer to the head of the configuration variable list.
+ * name is the name of the parameter to search for.
+ *
+ * Returns true if the parameter is found, false otherwise.
+ */
+static bool
+parameter_exists(ConfigVariable *head, const char *name)
+{
+	ConfigVariable *item;
+
+	for (item = head; item; item = item->next)
+	{
+		if (strcmp(item->name, name) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * Reset reloadable parameters removed from pgpool.conf.
+ *
+ * Only values previously loaded from pgpool.conf are reset. For dynamic
+ * arrays, the optional index-free value and explicitly indexed values are
+ * checked separately.
+ *
+ * head: Parsed parameters from the current pgpool.conf.
+ * context: Configuration context used to reset the parameters.
+ */
+void
+reset_removed_parameters(ConfigVariable *head, ConfigContext context)
+{
+	int i;
+
+	for (i = 0; i < num_all_parameters; i++)
+	{
+		struct config_generic *gconf = all_parameters[i];
+
+		/* Skip startup-only parameters. */
+		switch (gconf->context)
+		{
+			case CFGCXT_RELOAD:
+			case CFGCXT_PCP:
+			case CFGCXT_SESSION:
+				break;
+
+			case CFGCXT_BOOT:
+			case CFGCXT_INIT:
+				continue;
+		}
+
+		/*
+		 * For dynamic arrays, handle the optional index-free
+		 * value and each explicitly indexed value separately.
+		 */
+		if (gconf->dynamic_array_var)
+		{
+			int j;
+
+			/*
+			 * Reset the index-free value if it is supported,
+			 * absent from the current file, and was
+			 * previously loaded from pgpool.conf.
+			 */
+			if (gconf->flags & ARRAY_VAR_ALLOW_NO_INDEX &&
+				!parameter_exists(head, gconf->name))
+			{
+				struct config_generic *idx_free;
+
+				idx_free = get_index_free_record_if_any(gconf);
+
+				if (idx_free && idx_free->sources[0] == PGC_S_FILE)
+				{
+					setConfigOption(gconf->name, NULL,
+									context, PGC_S_DEFAULT, DEBUG1);
+				}
+			}
+
+			/* Reset each indexed value. */
+			for (j = 0; j < gconf->max_elements; j++)
+			{
+				char namebuf[POOLMAXPATHLEN];
+
+				snprintf(namebuf, sizeof(namebuf),
+						 "%s%d", gconf->name, j);
+
+				if (parameter_exists(head, namebuf))
+					continue;
+
+				/*
+				 * Only reset values that were explicitly
+				 * loaded from the previous pgpool.conf.
+				 */
+				if (gconf->sources[j] != PGC_S_FILE)
+					continue;
+
+				setConfigOption(namebuf, NULL,
+								context, PGC_S_DEFAULT, DEBUG1);
+			}
+		}
+		else
+		{
+			/*
+			 * The scalar parameter is still present
+			 * in pgpool.conf.
+			 */
+			if (parameter_exists(head, gconf->name))
+				continue;
+
+			/*
+			 * Only reset a value that was loaded from
+			 * the previous pgpool.conf.
+			 */
+			if (gconf->sources[0] != PGC_S_FILE)
+				continue;
+
+			/*
+			 * Reset the removed scalar parameter to
+			 * its default value.
+			 */
+			setConfigOption(gconf->name, NULL,
+							context, PGC_S_DEFAULT, DEBUG1);
+		}
 	}
 }
 

@@ -33,6 +33,33 @@
 #include "pool.h"
 
 
+/*
+ * Read the length of a JSON array supplied by an untrusted peer and
+ * cap it at the caller-supplied bound. Rejects non-array values and
+ * out-of-range counts via ereport(ERROR); the longjmp out of the
+ * parser is the same exit channel callers already expect from
+ * json_get_*_value_for_key on malformed input.
+ */
+static int
+parse_peer_count(const json_value *jv, const char *field, int max_count)
+{
+	int			count;
+
+	if (jv == NULL || jv->type != json_array)
+		ereport(ERROR,
+				(errmsg("invalid watchdog JSON payload"),
+				 errdetail("field \"%s\" missing or not an array", field)));
+
+	count = (int) jv->u.array.length;
+	if (count < 0 || count > max_count)
+		ereport(ERROR,
+				(errmsg("invalid watchdog JSON payload"),
+				 errdetail("field \"%s\" length %u exceeds maximum %d",
+						   field, jv->u.array.length, max_count)));
+
+	return count;
+}
+
 POOL_CONFIG *
 get_pool_config_from_json(char *json_data, int data_len)
 {
@@ -124,10 +151,8 @@ get_pool_config_from_json(char *json_data, int data_len)
 
 	/* backend_desc array */
 	value = json_get_value_for_key(root, "backend_desc");
-	if (value == NULL || value->type != json_array)
-		goto ERROR_EXIT;
-
-	config->backend_desc->num_backends = value->u.array.length;
+	config->backend_desc->num_backends = parse_peer_count(value, "backend_desc",
+														  MAX_NUM_BACKENDS);
 	for (i = 0; i < config->backend_desc->num_backends; i++)
 	{
 		json_value *arr_value = value->u.array.values[i];
@@ -138,7 +163,8 @@ get_pool_config_from_json(char *json_data, int data_len)
 		ptr = json_get_string_value_for_key(arr_value, "backend_hostname");
 		if (ptr == NULL)
 			goto ERROR_EXIT;
-		strncpy(config->backend_desc->backend_info[i].backend_hostname, ptr, sizeof(config->backend_desc->backend_info[i].backend_hostname) - 1);
+		strlcpy(config->backend_desc->backend_info[i].backend_hostname, ptr,
+				sizeof(config->backend_desc->backend_info[i].backend_hostname));
 	}
 
 	value = json_get_value_for_key(root, "health_check_params");
@@ -185,6 +211,12 @@ get_pool_config_from_json(char *json_data, int data_len)
 	value = json_get_value_for_key(root, "wd_nodes");
 	if (value == NULL || value->type != json_array)
 		goto ERROR_EXIT;
+
+	if (value->u.array.length > MAX_WATCHDOG_NUM)
+		ereport(ERROR,
+				(errmsg("invalid watchdog configuration JSON"),
+				 errdetail("wd_nodes array length %u exceeds MAX_WATCHDOG_NUM (%d)",
+						   value->u.array.length, MAX_WATCHDOG_NUM)));
 
 	config->wd_nodes.num_wd = value->u.array.length;
 	for (i = 0; i < config->wd_nodes.num_wd; i++)
@@ -826,6 +858,13 @@ parse_wd_node_function_json(char *json_data, int data_len, char **func_name, int
 		json_value_free(root);
 		return true;
 	}
+	if (node_count > MAX_NUM_BACKENDS)
+	{
+		json_value_free(root);
+		ereport(ERROR,
+				(errmsg("watchdog NodeIdList count %d exceeds MAX_NUM_BACKENDS (%d)",
+						node_count, MAX_NUM_BACKENDS)));
+	}
 	*count = node_count;
 
 	value = json_get_value_for_key(root, "NodeIdList");
@@ -857,7 +896,7 @@ parse_wd_node_function_json(char *json_data, int data_len, char **func_name, int
 	*node_id_set = palloc(sizeof(int) * node_count);
 	for (i = 0; i < node_count; i++)
 	{
-		*node_id_set[i] = value->u.array.values[i]->u.integer;
+		(*node_id_set)[i] = value->u.array.values[i]->u.integer;
 	}
 	json_value_free(root);
 	return true;

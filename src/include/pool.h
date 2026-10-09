@@ -345,7 +345,7 @@ extern int	pool_get_major_version(void);
 extern bool pool_is_node_to_be_sent_in_current_query(int node_id);
 extern int	pool_virtual_main_db_node_id(void);
 
-extern BACKEND_STATUS *my_backend_status[];
+extern volatile BACKEND_STATUS *my_backend_status[];
 extern int	my_main_node_id;
 
 #define VALID_BACKEND(backend_id) \
@@ -424,7 +424,7 @@ typedef enum
 #define Min(x, y)		((x) < (y) ? (x) : (y))
 
 
-#define MAX_NUM_SEMAPHORES		8
+#define MAX_NUM_SEMAPHORES		9
 #define CONN_COUNTER_SEM		0
 #define REQUEST_INFO_SEM		1
 #define QUERY_CACHE_STATS_SEM	2
@@ -434,6 +434,7 @@ typedef enum
 #define FOLLOW_PRIMARY_SEM		6
 #define MAIN_EXIT_HANDLER_SEM	7	/* used in exit_hander in pgpool main
 									 * process */
+#define TRACK_TABLE_MUTATION_TABLE_SEM	8
 #define MAX_REQUEST_QUEUE_SIZE	10
 
 #define MAX_SEC_WAIT_FOR_CLUSTER_TRANSACTION 10 /* time in seconds to keep

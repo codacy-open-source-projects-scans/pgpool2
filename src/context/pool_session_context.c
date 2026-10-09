@@ -125,6 +125,7 @@ pool_init_session_context(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backe
 
 	/* We don't have a write query in this transaction yet */
 	pool_unset_writing_transaction();
+	pool_unset_really_writing_transaction();
 
 	/* Error doesn't occur in this transaction yet */
 	pool_unset_failed_transaction();
@@ -140,6 +141,9 @@ pool_init_session_context(POOL_CONNECTION *frontend, POOL_CONNECTION_POOL *backe
 
 	/* Unset suspend reading from frontend flag */
 	pool_unset_suspend_reading_from_frontend();
+
+	/* Unset suspend reading from frontend (copy in) flag */
+	pool_unset_suspend_reading_from_frontend_copy_in();
 
 	/*
 	 * Reset flag to indicate difference in number of affected tuples in
@@ -338,6 +342,107 @@ pool_unset_doing_extended_query_message(void)
 }
 
 /*
+ * Return true if an extended-query message has been received from the
+ * frontend and its terminating Sync message has not been received yet.
+ */
+bool
+pool_is_waiting_for_frontend_sync(void)
+{
+	return pool_get_session_context(false)->waiting_for_frontend_sync;
+}
+
+/*
+ * Mark that the session is waiting for the frontend Sync message.
+ */
+void
+pool_set_waiting_for_frontend_sync(void)
+{
+	ereport(DEBUG5,
+			(errmsg("session context: waiting for frontend Sync")));
+
+	pool_get_session_context(false)->waiting_for_frontend_sync = true;
+}
+
+/*
+ * Mark that the frontend Sync message has been received.
+ */
+void
+pool_unset_waiting_for_frontend_sync(void)
+{
+	ereport(DEBUG5,
+			(errmsg("session context: no longer waiting for frontend Sync")));
+
+	pool_get_session_context(false)->waiting_for_frontend_sync = false;
+}
+
+/*
+ * Return true if a non-SELECT was executed in the current pipeline
+ * since the previous frontend Sync.
+ */
+bool
+pool_is_pipeline_write_executed(void)
+{
+	return pool_get_session_context(false)->pipeline_write_executed;
+}
+
+/*
+ * Remember that a non-SELECT was executed in the current pipeline
+ * since the previous frontend Sync.
+ */
+void
+pool_set_pipeline_write_executed(void)
+{
+	pool_get_session_context(false)->pipeline_write_executed = true;
+}
+
+/*
+ * Clear the non-SELECT execution state when the current pipeline
+ * reaches its terminating frontend Sync.
+ */
+void
+pool_unset_pipeline_write_executed(void)
+{
+	pool_get_session_context(false)->pipeline_write_executed = false;
+}
+
+/*
+ * Set backend execution state for the current pipeline.
+ */
+void
+pool_set_pipeline_state(unsigned char state)
+{
+	POOL_SESSION_CONTEXT *session_context;
+
+	session_context = pool_get_session_context(false);
+	session_context->pipeline_state |= state;
+}
+
+/*
+ * Clear backend execution state for the current pipeline.
+ */
+void
+pool_unset_pipeline_state(unsigned char state)
+{
+	POOL_SESSION_CONTEXT *session_context;
+
+	session_context = pool_get_session_context(false);
+	session_context->pipeline_state &= ~state;
+}
+
+/*
+ * Return true if all specified backend execution state flags are set
+ * for the current pipeline.
+ */
+bool
+pool_has_pipeline_state(unsigned char state)
+{
+	POOL_SESSION_CONTEXT *session_context;
+
+	session_context = pool_get_session_context(false);
+	return (session_context->pipeline_state & state) == state;
+}
+
+/*
  * Return true if backends ignore extended query message
  */
 bool
@@ -532,20 +637,26 @@ dump_sent_message(char *caller, POOL_SENT_MESSAGE *m)
 static void
 dml_adaptive_init(void)
 {
-	if (pool_config->disable_load_balance_on_write == DLBOW_DML_ADAPTIVE)
+	if (DLBOW_IS_DML_ADAPTIVE(pool_config->disable_load_balance_on_write))
 	{
 		session_context->is_in_transaction = false;
 		session_context->transaction_temp_write_list = NIL;
+		session_context->transaction_temp_write_oid_list = NIL;
+		session_context->transaction_temp_write_dboid = 0;
 	}
 }
 
 static void
 dml_adaptive_destroy(void)
 {
-	if (pool_config->disable_load_balance_on_write == DLBOW_DML_ADAPTIVE && session_context)
+	if (DLBOW_IS_DML_ADAPTIVE(
+							  pool_config->disable_load_balance_on_write) &&
+		session_context)
 	{
 		if (session_context->transaction_temp_write_list != NIL)
 			list_free_deep(session_context->transaction_temp_write_list);
+		if (session_context->transaction_temp_write_oid_list != NIL)
+			list_free(session_context->transaction_temp_write_oid_list);
 	}
 }
 
@@ -731,6 +842,12 @@ pool_unset_writing_transaction(void)
 	}
 }
 
+void
+pool_unset_really_writing_transaction(void)
+{
+	pool_get_session_context(false)->really_writing_transaction = false;
+}
+
 /*
  * We have a write query in this transaction.
  */
@@ -738,15 +855,24 @@ void
 pool_set_writing_transaction(void)
 {
 	/*
-	 * If disable_transaction_on_write is 'off' or 'dml_adaptive', then never
-	 * turn on writing transaction flag.
+	 * If disable_load_balance_on_write is 'off' or 'dml_adaptive' or
+	 * 'dml_adaptive_global', then never turn on writing transaction flag.
 	 */
-	if (pool_config->disable_load_balance_on_write != DLBOW_OFF && pool_config->disable_load_balance_on_write != DLBOW_DML_ADAPTIVE)
+	if (pool_config->disable_load_balance_on_write !=
+		DLBOW_OFF &&
+		!DLBOW_IS_DML_ADAPTIVE(
+							   pool_config->disable_load_balance_on_write))
 	{
 		pool_get_session_context(false)->writing_transaction = true;
 		ereport(DEBUG5,
 				(errmsg("session context: setting writing transaction. DONE")));
 	}
+}
+
+void
+pool_set_really_writing_transaction(void)
+{
+	pool_get_session_context(false)->really_writing_transaction = true;
 }
 
 /*
@@ -756,6 +882,15 @@ bool
 pool_is_writing_transaction(void)
 {
 	return pool_get_session_context(false)->writing_transaction;
+}
+
+/*
+ * Do we really have a write query in this transaction?
+ */
+bool
+pool_is_really_writing_transaction(void)
+{
+	return pool_get_session_context(false)->really_writing_transaction;
 }
 
 /*
@@ -1765,6 +1900,33 @@ pool_unset_suspend_reading_from_frontend(void)
 	session_context->suspend_reading_from_frontend = false;
 }
 
+/*
+ * Is suspend_reading_from_frontend_copy_in flag set?
+ */
+bool
+pool_is_suspend_reading_from_frontend_copy_in(void)
+{
+	return session_context->suspend_reading_from_frontend_copy_in;
+}
+
+/*
+ * Set suspend_reading_from_frontend_copy_in flag.
+ */
+void
+pool_set_suspend_reading_from_frontend_copy_in(void)
+{
+	session_context->suspend_reading_from_frontend_copy_in = true;
+}
+
+/*
+ * Unset suspend_reading_from_frontend_copy_in flag.
+ */
+void
+pool_unset_suspend_reading_from_frontend_copy_in(void)
+{
+	session_context->suspend_reading_from_frontend_copy_in = false;
+}
+
 /*-----------------------------------------------------------------------
  * Temporary table list management modules.
  *-----------------------------------------------------------------------
@@ -1867,8 +2029,8 @@ pool_temp_tables_delete(char *tablename, POOL_TEMP_TABLE_STATE state)
 		ereport(ERROR,
 				(errmsg("pool_temp_tables_delete: session context is not initialized")));
 
-	ereport(LOG,
-			(errmsg("pool_temp_tables_delete: table: %s state: %d", tablename, state)));
+	elog(DEBUG5, "pool_temp_tables_delete: table: %s state: %d",
+		 tablename, state);
 
 	old_context = MemoryContextSwitchTo(session_context->memory_context);
 
